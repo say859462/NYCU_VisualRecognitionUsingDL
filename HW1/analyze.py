@@ -8,7 +8,7 @@ from dataset import ImageDataset
 from model import ImageClassificationModel
 
 from val import validate_one_epoch
-from utils import plot_class_distribution, plot_per_class_error, plot_correlation_analysis,ProcessCrops
+from utils import plot_class_distribution, plot_per_class_error, plot_correlation_analysis, ProcessCrops
 
 
 def main():
@@ -24,8 +24,10 @@ def main():
 
     val_transform = transforms.Compose([
         transforms.Resize(400),
-        transforms.FiveCrop(384),
-        ProcessCrops()
+        transforms.CenterCrop(384), 
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225])
     ])
 
     val_dataset = ImageDataset(

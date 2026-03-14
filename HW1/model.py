@@ -88,7 +88,7 @@ class ImageClassificationModel(nn.Module):
         self.cbam = CBAM(in_planes=2048, ratio=16, kernel_size=7)
 
         # self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.pool = GeM(p=3.0)
+        self.pool = GeM(p=5.0)
         self.flatten = nn.Flatten()
 
         self.embedding = nn.Sequential(

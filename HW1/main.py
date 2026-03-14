@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy,ProcessCrops
+from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, ClassBalancedFocalLoss
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -84,8 +84,10 @@ def main():
 
     val_transform = transforms.Compose([
         transforms.Resize(400),
-        transforms.FiveCrop(384), 
-        ProcessCrops()
+        transforms.CenterCrop(384),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225])
     ])
 
     train_dataset = ImageDataset(
@@ -125,7 +127,8 @@ def main():
     cb_weights = cb_weights / np.sum(cb_weights) * NUM_CLASSES  #
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    criterion = ClassBalancedFocalLoss(
+        cb_weights=class_weights, gamma=2.0, label_smoothing=0.1)
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []
@@ -141,7 +144,7 @@ def main():
         {'params': model.backbone.parameters(), 'lr': LR_BACKBONE},
         # Head (Classifier)
         {'params': model.classifier.parameters(), 'lr': LR_HEAD}
-    ], weight_decay=5e-4)
+    ], weight_decay=1e-4)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR

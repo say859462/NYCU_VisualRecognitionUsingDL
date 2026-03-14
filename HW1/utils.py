@@ -2,8 +2,29 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from scipy.stats import pearsonr
 from torchvision import transforms
+
+class ClassBalancedFocalLoss(nn.Module):
+    def __init__(self, cb_weights, gamma=2.0, label_smoothing=0.1):
+        super().__init__()
+        self.cb_weights = cb_weights
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(
+            inputs, 
+            targets, 
+            weight=self.cb_weights, 
+            label_smoothing=self.label_smoothing, 
+            reduction='none' 
+        )
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        return focal_loss.mean()
 
 class ProcessCrops:
     """

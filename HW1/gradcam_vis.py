@@ -20,12 +20,12 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 def main():
     parser = argparse.ArgumentParser(
         description="Batch Grad-CAM Visualization for ResNet152")
-    parser.add_argument('--dir_path', type=str, default='./Dataset/data/val/48',
+    parser.add_argument('--dir_path', type=str, default='./Dataset/data/val/2',
                         help='Path to the directory containing images (e.g., ./Dataset/data/val/2)')
     parser.add_argument('--num_samples', type=int, default=10,
                         help='Number of images to randomly sample')
     parser.add_argument('--model_path', type=str,
-                        default='./Model_Weight/9th/best_model.pth', help='Path to model weight')
+                        default='./Model_Weight/10th/best_model.pth', help='Path to model weight')
     parser.add_argument('--num_classes', type=int,
                         default=100, help='Number of classes')
     parser.add_argument('--save_dir', type=str,
@@ -68,6 +68,9 @@ def main():
 
     # 4. 設定 Grad-CAM 目標層 (ResNet152 最後一層卷積)
     target_layers = [model.backbone[7][-1]]
+
+    # target_layers = [model.cbam]
+
     # 影像前處理定義
     preprocess_geo = transforms.Compose([
         transforms.Resize(400),

@@ -38,8 +38,10 @@ def main():
 
     test_transform = transforms.Compose([
         transforms.Resize(400),
-        transforms.FiveCrop(384),
-        ProcessCrops()
+        transforms.CenterCrop(384),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225])
     ])
 
     test_dataset = ImageDataset(
@@ -67,13 +69,12 @@ def main():
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Predicting"):
             # images shape: [Batch_Size, 10, 3, 384, 384]
-            bs, n_crops, c, h, w = images.size()
+            images = images.to(device)
             # Multi-crop inference
-            images = images.view(-1, c, h, w).to(device)
 
             outputs = model(images)
-            outputs_avg = outputs.view(bs, n_crops, -1).mean(dim=1)
-            _, preds = torch.max(outputs_avg, 1)
+
+            _, preds = torch.max(outputs, 1)
 
             all_predictions.extend(preds.cpu().numpy())
 
