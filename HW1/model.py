@@ -69,18 +69,13 @@ class GeM(nn.Module):
 
 class ImageClassificationModel(nn.Module):
     def __init__(self, num_classes: int = 100, pretrained: bool = True):
-        """Custom Model with ResNet backbone
-
-        Args:
-            num_classes (int, optional): Number of classes for classification. Defaults to 100.
-            pretrained (bool, optional): Whether to use pretrained weights. Defaults to True.
-        """
         super(ImageClassificationModel, self).__init__()
 
         # Backbone model : ResNet
         resnet = models.resnet152(
             weights=models.ResNet152_Weights.DEFAULT if pretrained else None,
-            replace_stride_with_dilation=[False, False, True])
+            replace_stride_with_dilation=[False, False, True]
+        )
 
         self.stage1_3 = nn.Sequential(*list(resnet.children())[:7])
         self.stage4 = nn.Sequential(*list(resnet.children())[7:8])
@@ -90,39 +85,51 @@ class ImageClassificationModel(nn.Module):
 
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.flatten = nn.Flatten()
+
 
         self.embedding = nn.Sequential(
-            nn.Linear(3072 * 2, 512),
+            nn.Linear(6144, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.5)
+            nn.Dropout(p=0.4)
         )
         self.classifier = nn.Linear(512, num_classes)
+        self._init_weights()
 
     def forward(self, x):
+
         f3 = self.stage1_3(x)  # [B, 1024, 28, 28]
         f3 = self.cbam_l3(f3)
 
-        f4 = self.stage4(f3)  # [B, 2048, 14, 14]
+
+        p_avg_3 = self.avg_pool(f3).flatten(1)  # [B, 1024]
+        p_max_3 = self.max_pool(f3).flatten(1)  # [B, 1024]
+
+
+        f4 = self.stage4(f3)   # [B, 2048, 14, 14]
         f4 = self.cbam_l4(f4)
 
-        f4_up = F.interpolate(
-            f4, size=f3.shape[2:], mode='bilinear', align_corners=False)
 
-        # Feature normalization before concatenation to ensure balanced contributions from both feature maps
-        f3_norm = F.normalize(f3, p=2, dim=1)
-        f4_norm = F.normalize(f4_up, p=2, dim=1)
+        p_avg_4 = self.avg_pool(f4).flatten(1)  # [B, 2048]
+        p_max_4 = self.max_pool(f4).flatten(1)  # [B, 2048]
 
-        fused_spatial = torch.cat([f3_norm, f4_norm], dim=1)
 
-        p_avg = self.avg_pool(fused_spatial).flatten(1)
-        p_max = self.max_pool(fused_spatial).flatten(1)
-
-        combined = torch.cat([p_avg, p_max], dim=1)  # [B, 6144]
+        combined = torch.cat(
+            [p_avg_3, p_max_3, p_avg_4, p_max_4], dim=1)  # [B, 6144]
 
         embeddings = self.embedding(combined)
         return self.classifier(embeddings)
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(
+                    m.weight, mode='fan_out', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
     def check_parameters(self):
         # Check the total number of trainable parameters in the model

@@ -1,8 +1,8 @@
 {
   "batch_size": 32,
   "num_epochs": 50,
-  "learning_rate_backbone": 0.0001,
-  "learning_rate_head": 0.0005,
+  "learning_rate_backbone": 1e-4,
+  "learning_rate_head": 5e-4,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
   "checkpoint_path": "./Model_Weight/checkpoint.pth",

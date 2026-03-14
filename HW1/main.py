@@ -67,7 +67,7 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(448, scale=(0.4, 1.0)),
+        transforms.RandomResizedCrop(448, scale=(0.6, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(
             brightness=0.15,
@@ -129,7 +129,7 @@ def main():
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
     criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.1)
+        cb_weights=class_weights, gamma=1.5, label_smoothing=0.1)
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []
@@ -153,7 +153,7 @@ def main():
     cosine_epochs = NUM_EPOCHS - warmup_epochs
     warmup_sch = LinearLR(
         optimizer,
-        start_factor=0.1,
+        start_factor=0.5,
         total_iters=warmup_epochs
     )
     cosine_sch = CosineAnnealingLR(
