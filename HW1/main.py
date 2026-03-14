@@ -67,7 +67,7 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(448, scale=(0.3, 1.0)),
+        transforms.RandomResizedCrop(576, scale=(0.3, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(
             brightness=0.1,
@@ -83,8 +83,8 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        transforms.Resize(640),
+        transforms.CenterCrop(576),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -149,7 +149,7 @@ def main():
         {'params': model.se_l3.parameters(), 'lr': LR_HEAD},
         {'params': model.gem.parameters(), 'lr': LR_HEAD},
         {'params': model.reduce3.parameters(), 'lr': LR_HEAD},
-        {'params': model.reduce4.parameters(), 'lr': LR_HEAD},
+        {'params': model.fc_cbp.parameters(), 'lr': LR_HEAD},
         {'params': model.embedding.parameters(), 'lr': LR_HEAD},
         {'params': model.classifier.parameters(), 'lr': LR_HEAD}
     ], weight_decay=3e-4)

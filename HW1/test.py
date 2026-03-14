@@ -28,7 +28,7 @@ def main():
     BATCH_SIZE = config['batch_size']
     NUM_CLASSES = config['num_classes']
     DATA_DIR = config['data_dir']
-    BEST_MODEL_PATH = './Model_Weight/13th/best_model.pth'
+    BEST_MODEL_PATH = './Model_Weight/best_model.pth'
     OUTPUT_CSV = "prediction.csv"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,8 +37,8 @@ def main():
     # Test Dataset and DataLoader
 
     test_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        transforms.Resize(640),
+        transforms.CenterCrop(576),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])

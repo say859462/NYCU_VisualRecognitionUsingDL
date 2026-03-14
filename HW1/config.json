@@ -1,5 +1,5 @@
 {
-  "batch_size": 32,
+  "batch_size": 16,
   "num_epochs": 30,
   "learning_rate_backbone": 1e-4,
   "learning_rate_head": 5e-4,

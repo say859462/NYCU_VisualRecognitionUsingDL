@@ -76,10 +76,59 @@ class SEBlock(nn.Module):
         # Scale
         return x * y.expand_as(x)
 
+# Compact Bilinear Pooling Layer
+# Reference: https://arxiv.org/pdf/1506.02310.pdf
+
+
+class CompactBilinearPooling(nn.Module):
+    def __init__(self, input_dim=2048, output_dim=8192):
+        super(CompactBilinearPooling, self).__init__()
+        self.output_dim = output_dim
+
+        self.register_buffer('h1', torch.randint(0, output_dim, (input_dim,)))
+        self.register_buffer('s1', torch.randint(0, 2, (input_dim,)) * 2 - 1)
+        self.register_buffer('h2', torch.randint(0, output_dim, (input_dim,)))
+        self.register_buffer('s2', torch.randint(0, 2, (input_dim,)) * 2 - 1)
+
+    def forward(self, x):
+
+        B, C, H, W = x.size()
+        x_flat = x.view(B, C, -1)
+
+        x1 = x_flat * self.s1.view(1, C, 1)
+        x2 = x_flat * self.s2.view(1, C, 1)
+
+        sketch1 = torch.zeros(B, self.output_dim, H * W,
+                              dtype=x.dtype, device=x.device)
+        sketch1.scatter_add_(1, self.h1.view(1, C, 1).expand(B, C, H * W), x1)
+
+        sketch2 = torch.zeros(B, self.output_dim, H * W,
+                              dtype=x.dtype, device=x.device)
+        sketch2.scatter_add_(1, self.h2.view(1, C, 1).expand(B, C, H * W), x2)
+
+        # Convert to FP32 for FFT operations to maintain numerical stability
+        sketch1_f32 = sketch1.float()
+        sketch2_f32 = sketch2.float()
+
+        fft1 = torch.fft.fft(sketch1_f32, dim=1)
+        fft2 = torch.fft.fft(sketch2_f32, dim=1)
+        fft_product = fft1 * fft2
+
+        cbp = torch.fft.ifft(fft_product, dim=1).real
+
+        # Switch back to FP16
+        cbp = cbp.to(x.dtype)
+
+        cbp = cbp.sum(dim=-1)  # shape: [B, output_dim]
+
+        cbp = torch.sign(cbp) * torch.sqrt(torch.abs(cbp) + 1e-5)
+        cbp = F.normalize(cbp, p=2, dim=1)
+
+        return cbp
+
+
 # GeM Pooling Layer(Generalized Mean Pooling)
 # Reference: https://arxiv.org/pdf/1711.02512.pdf
-
-
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6):
         super(GeM, self).__init__()
@@ -96,27 +145,34 @@ class ImageClassificationModel(nn.Module):
 
         # Backbone model : ResNet
         resnet = models.resnet152(
-            weights=models.ResNet152_Weights.DEFAULT if pretrained else None
-        )
-
+            weights=models.ResNet152_Weights.DEFAULT if pretrained else None)
         self.backbone_l1_l3 = nn.Sequential(*list(resnet.children())[:7])
         self.backbone_l4 = nn.Sequential(*list(resnet.children())[7:8])
 
-        # Layer 3 SEBlock
+        # --- Layer 3 Processing ---
         self.se_l3 = SEBlock(in_channels=1024, reduction=16)
-
         self.reduce3 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
-        self.reduce4 = nn.Conv2d(2048, 512, kernel_size=1, bias=False)
-
         self.gem = GeM(p=5)
 
-        self.embedding = nn.Sequential(
-            nn.Linear(1024, 768),
-            nn.BatchNorm1d(768),
-            nn.PReLU(),
-            nn.Dropout(p=0.5),
+        # --- Layer 4 Processing ---
 
-            nn.Linear(768, 512),
+        self.cbp = CompactBilinearPooling(input_dim=2048, output_dim=8192)
+
+        self.fc_cbp = nn.Sequential(
+            nn.Linear(8192, 2048),
+            nn.BatchNorm1d(2048),
+            nn.PReLU(),
+            nn.Dropout(p=0.4),
+
+
+            nn.Linear(2048, 512),
+            nn.BatchNorm1d(512),
+            nn.PReLU(),
+            nn.Dropout(p=0.4)
+        )
+
+        self.embedding = nn.Sequential(
+            nn.Linear(1024, 512),  # Layer3(512) + Layer4_CBP(512)
             nn.BatchNorm1d(512),
             nn.PReLU(),
             nn.Dropout(p=0.4)
@@ -124,22 +180,19 @@ class ImageClassificationModel(nn.Module):
         self.classifier = nn.Linear(512, num_classes)
 
     def forward(self, x):
-
-        # --- Layer 3 Processing ---
-        f3 = self.backbone_l1_l3(x)                        # [B, 1024, 28, 28]
+        # Layer 3 pipeline
+        f3 = self.backbone_l1_l3(x)
         f3_att = self.se_l3(f3)
+        f3_reduced = self.reduce3(f3_att)
+        p3 = self.gem(f3_reduced).flatten(1)       # [B, 512]
 
-        f3_reduced = self.reduce3(f3_att)                  # 1x1 Conv
-        p3 = self.gem(f3_reduced).flatten(1)
+        # Layer 4 CBP pipeline
+        f4 = self.backbone_l4(f3)                  # [B, 2048, 14, 14]
+        p4_cbp = self.cbp(f4)                      # [B, 8192]
+        p4 = self.fc_cbp(p4_cbp)                   # [B, 512]
 
-        # --- Layer 4 Processing ---
-        f4 = self.backbone_l4(f3)                          # [B, 2048, 14, 14]
-        f4_reduced = self.reduce4(f4)
-        p4 = self.gem(f4_reduced).flatten(1)
-
-        # --- Progressive Fusion ---
-        fused = torch.cat([p3, p4], dim=1)                 # [B, 1024]
-        embeddings = self.embedding(fused)                 # [B, 512]
+        fused = torch.cat([p3, p4], dim=1)         # [B, 1024]
+        embeddings = self.embedding(fused)
         return self.classifier(embeddings)
 
     def check_parameters(self):

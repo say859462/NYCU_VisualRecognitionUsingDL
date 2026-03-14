@@ -16,6 +16,7 @@ from model import ImageClassificationModel
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Dual-layer Grad-CAM Visualization for All Classes")
@@ -28,7 +29,7 @@ def main():
     parser.add_argument('--num_classes', type=int,
                         default=100, help='Number of classes')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/13th', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/14th', help='Directory to save heatmaps')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,7 +50,7 @@ def main():
     model.eval()
 
     # 3. 初始化雙重 Grad-CAM 物件 (鎖定全新的平行注意力模組)
-    cam_l3 = GradCAM(model=model, target_layers=[model.se_l3]) # 這裡改成 se_l3
+    cam_l3 = GradCAM(model=model, target_layers=[model.se_l3])  # 這裡改成 se_l3
     cam_l4 = GradCAM(model=model, target_layers=[model.backbone_l4[-1]])
 
     # 影像前處理定義
@@ -59,7 +60,8 @@ def main():
     ])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
+                             0.229, 0.224, 0.225])
     ])
 
     valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp')
@@ -89,30 +91,36 @@ def main():
             try:
                 raw_img = Image.open(img_path).convert('RGB')
                 cropped_img = preprocess_geo(raw_img)
-                input_tensor = preprocess_tensor(cropped_img).unsqueeze(0).to(device)
+                input_tensor = preprocess_tensor(
+                    cropped_img).unsqueeze(0).to(device)
                 rgb_img = np.float32(cropped_img) / 255.0
 
                 # 取得預測結果
                 with torch.no_grad():
                     outputs = model(input_tensor)
-                    probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
+                    probabilities = torch.nn.functional.softmax(outputs, dim=1)[
+                        0]
                     pred_class = probabilities.argmax().item()
                     pred_score = probabilities[pred_class].item()
 
                 # 執行 Layer 3 Grad-CAM
-                grayscale_cam_l3 = cam_l3(input_tensor=input_tensor, targets=None)[0, :]
-                vis_l3 = show_cam_on_image(rgb_img, grayscale_cam_l3, use_rgb=True)
+                grayscale_cam_l3 = cam_l3(
+                    input_tensor=input_tensor, targets=None)[0, :]
+                vis_l3 = show_cam_on_image(
+                    rgb_img, grayscale_cam_l3, use_rgb=True)
 
                 # 執行 Layer 4 Grad-CAM
-                grayscale_cam_l4 = cam_l4(input_tensor=input_tensor, targets=None)[0, :]
-                vis_l4 = show_cam_on_image(rgb_img, grayscale_cam_l4, use_rgb=True)
+                grayscale_cam_l4 = cam_l4(
+                    input_tensor=input_tensor, targets=None)[0, :]
+                vis_l4 = show_cam_on_image(
+                    rgb_img, grayscale_cam_l4, use_rgb=True)
 
                 # 繪製 1x3 並排對比圖
                 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-                
+
                 # 判斷是否預測正確以決定標題顏色
                 color = 'green' if str(pred_class) == str(class_id) else 'red'
-                fig.suptitle(f"True: {class_id} | Pred: {pred_class} (Conf: {pred_score*100:.1f}%)", 
+                fig.suptitle(f"True: {class_id} | Pred: {pred_class} (Conf: {pred_score*100:.1f}%)",
                              fontsize=16, color=color, fontweight='bold')
 
                 # [子圖 1] 原始圖片
@@ -134,14 +142,17 @@ def main():
 
                 # 儲存圖片
                 base_filename = os.path.splitext(os.path.basename(img_path))[0]
-                save_path = os.path.join(class_save_dir, f"dual_cam_{base_filename}.png")
+                save_path = os.path.join(
+                    class_save_dir, f"dual_cam_{base_filename}.png")
                 plt.savefig(save_path)
                 plt.close()
 
             except Exception as e:
                 print(f"\nError processing {img_path}: {e}")
 
-    print(f"\nAll done! Dual-CAM heatmaps are categorized by class in: {args.save_dir}")
+    print(
+        f"\nAll done! Dual-CAM heatmaps are categorized by class in: {args.save_dir}")
+
 
 if __name__ == '__main__':
     main()
