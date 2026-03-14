@@ -70,8 +70,8 @@ def main():
         transforms.RandomResizedCrop(448, scale=(0.4, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(
-            brightness=0.1,
-            contrast=0.1,
+            brightness=0.15,
+            contrast=0.15,
         ),
         transforms.RandomApply([transforms.GaussianBlur(
             kernel_size=5, sigma=(0.1, 2.0))], p=0.3),
@@ -107,15 +107,13 @@ def main():
     # ==============================================================================
     # 3.1 Model Initialization
     model = ImageClassificationModel(
-        num_classes=NUM_CLASSES, pretrained=True).to(device)
+        num_classes=100, pretrained=True).to(device)
 
-    # Freeze the backbone except the last two layers (Layer3 and Layer4)
-    for name, param in model.backbone.named_parameters():
+    for param in model.stage1_3.parameters():
         param.requires_grad = False
-
-    for param in model.backbone[6].parameters():  # Layer3
+    for param in model.stage1_3[6].parameters():
         param.requires_grad = True
-    for param in model.backbone[7].parameters():  # Layer4
+    for param in model.stage4.parameters():
         param.requires_grad = True
 
     # 3.2 Loss Function : class-balance loss
@@ -143,9 +141,10 @@ def main():
             head_params.append(param)
 
     optimizer = optim.AdamW([
-        {'params': model.backbone[6].parameters(), 'lr': 1e-5},
-        {'params': model.backbone[7].parameters(), 'lr': 1e-5},
-        {'params': model.classifier.parameters(), 'lr': 5e-4}
+        {'params': model.stage1_3[6].parameters(), 'lr': LR_BACKBONE},
+        {'params': model.stage4.parameters(), 'lr': LR_BACKBONE},
+        {'params': model.embedding.parameters(), 'lr': LR_HEAD},
+        {'params': model.classifier.parameters(), 'lr': LR_HEAD}
     ], weight_decay=1e-4)
 
     # 3.4 Scheduler
@@ -231,7 +230,7 @@ def main():
 
             # 5.4 Print Metrics
             lr_backbone = optimizer.param_groups[0]['lr']
-            lr_head = optimizer.param_groups[1]['lr']
+            lr_head = optimizer.param_groups[2]['lr']
             print(f"LR_Backbone: {lr_backbone:.6f} | LR_Head: {lr_head:.6f}")
             print(
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")

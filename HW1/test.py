@@ -68,7 +68,7 @@ def main():
 
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Predicting"):
-            # images shape: [Batch_Size, 10, 3, 384, 384]
+            # images shape: [Batch_Size, 10, 3, H, W]
             images = images.to(device)
             # Multi-crop inference
 

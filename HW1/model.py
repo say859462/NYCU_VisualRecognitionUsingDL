@@ -82,40 +82,47 @@ class ImageClassificationModel(nn.Module):
             weights=models.ResNet152_Weights.DEFAULT if pretrained else None,
             replace_stride_with_dilation=[False, False, True])
 
-        self.backbone = nn.Sequential(
-            *list(resnet.children())[:-2])
-        # in_plane = 2048 for resnet152
-        self.cbam = CBAM(in_planes=2048, ratio=16, kernel_size=7)
+        self.stage1_3 = nn.Sequential(*list(resnet.children())[:7])
+        self.stage4 = nn.Sequential(*list(resnet.children())[7:8])
 
-        # self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        # self.pool = GeM(p=5.0)
+        self.cbam_l3 = CBAM(in_planes=1024, ratio=16)
+        self.cbam_l4 = CBAM(in_planes=2048, ratio=16)
 
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
-
         self.flatten = nn.Flatten()
 
         self.embedding = nn.Sequential(
-            nn.Linear(4096, 512),
+            nn.Linear(3072 * 2, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
             nn.Dropout(p=0.5)
         )
-
         self.classifier = nn.Linear(512, num_classes)
 
     def forward(self, x):
-        x = self.backbone(x)
-        x = self.cbam(x)
-        
-        feat_avg = self.flatten(self.avg_pool(x))
-        feat_max = self.flatten(self.max_pool(x))
-        combined_feat = torch.cat([feat_avg, feat_max], dim=1)
-        
-        embeddings = self.embedding(combined_feat)
-        logits = self.classifier(embeddings)
+        f3 = self.stage1_3(x)  # [B, 1024, 28, 28]
+        f3 = self.cbam_l3(f3)
 
-        return logits
+        f4 = self.stage4(f3)  # [B, 2048, 14, 14]
+        f4 = self.cbam_l4(f4)
+
+        f4_up = F.interpolate(
+            f4, size=f3.shape[2:], mode='bilinear', align_corners=False)
+
+        # Feature normalization before concatenation to ensure balanced contributions from both feature maps
+        f3_norm = F.normalize(f3, p=2, dim=1)
+        f4_norm = F.normalize(f4_up, p=2, dim=1)
+
+        fused_spatial = torch.cat([f3_norm, f4_norm], dim=1)
+
+        p_avg = self.avg_pool(fused_spatial).flatten(1)
+        p_max = self.max_pool(fused_spatial).flatten(1)
+
+        combined = torch.cat([p_avg, p_max], dim=1)  # [B, 6144]
+
+        embeddings = self.embedding(combined)
+        return self.classifier(embeddings)
 
     def check_parameters(self):
         # Check the total number of trainable parameters in the model
