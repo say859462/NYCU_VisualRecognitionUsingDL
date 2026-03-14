@@ -52,18 +52,27 @@ class CBAM(nn.Module):
         x = self.sa(x) * x
         return x
 
-
-class ParallelCBAM(nn.Module):
-    def __init__(self, in_planes, ratio=16):
-        super(ParallelCBAM, self).__init__()
-        # fine-grained (Kernel 3)
-        self.cbam_k3 = CBAM(in_planes, ratio=ratio, kernel_size=3)
-        # coarse-grained (Kernel 7)
-        self.cbam_k7 = CBAM(in_planes, ratio=ratio, kernel_size=7)
+# SEBlock (Squeeze-and-Excitation Block)
+# Reference: https://arxiv.org/pdf/1709.01507.pdf
+class SEBlock(nn.Module):
+    def __init__(self, in_channels, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(in_channels, in_channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_channels // reduction, in_channels, bias=False),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        # Combine the outputs of both CBAM branches to capture both fine-grained and coarse-grained attention
-        return self.cbam_k3(x) + self.cbam_k7(x)
+        b, c, _, _ = x.size()
+        # Squeeze
+        y = self.avg_pool(x).view(b, c)
+        # Excitation
+        y = self.fc(y).view(b, c, 1, 1)
+        # Scale
+        return x * y.expand_as(x)
 
 # GeM Pooling Layer(Generalized Mean Pooling)
 # Reference: https://arxiv.org/pdf/1711.02512.pdf
@@ -92,7 +101,7 @@ class ImageClassificationModel(nn.Module):
         self.backbone_l4 = nn.Sequential(*list(resnet.children())[7:8])
 
         # Layer 3 CBAM
-        self.cbam_l3 = CBAM(in_planes=1024, ratio=16, kernel_size=7)
+        self.se_l3 = SEBlock(in_channels=1024, reduction=16) 
 
         self.reduce3 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
         self.reduce4 = nn.Conv2d(2048, 512, kernel_size=1, bias=False)
@@ -117,7 +126,8 @@ class ImageClassificationModel(nn.Module):
 
         # --- Layer 3 Processing ---
         f3 = self.backbone_l1_l3(x)                        # [B, 1024, 28, 28]
-        f3_att = self.cbam_l3(f3)
+        f3_att = self.se_l3(f3)
+
         f3_reduced = self.reduce3(f3_att)                  # 1x1 Conv
         p3 = self.gem(f3_reduced).flatten(1)
 

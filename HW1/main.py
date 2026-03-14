@@ -73,7 +73,7 @@ def main():
             brightness=0.1,
             contrast=0.1,
         ),
-        transforms.RandomRotation(20),
+        transforms.RandomRotation(45),
         transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
@@ -146,7 +146,7 @@ def main():
         {'params': model.backbone_l4.parameters(), 'lr': LR_BACKBONE},
 
         # --- Head & Attention Params ---
-        {'params': model.cbam_l3.parameters(), 'lr': LR_HEAD},
+        {'params': model.se_l3.parameters(), 'lr': LR_HEAD},
         {'params': model.gem.parameters(), 'lr': LR_HEAD},
         {'params': model.reduce3.parameters(), 'lr': LR_HEAD},
         {'params': model.reduce4.parameters(), 'lr': LR_HEAD},
