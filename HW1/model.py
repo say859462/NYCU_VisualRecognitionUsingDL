@@ -54,6 +54,8 @@ class CBAM(nn.Module):
 
 # SEBlock (Squeeze-and-Excitation Block)
 # Reference: https://arxiv.org/pdf/1709.01507.pdf
+
+
 class SEBlock(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super(SEBlock, self).__init__()
@@ -100,8 +102,8 @@ class ImageClassificationModel(nn.Module):
         self.backbone_l1_l3 = nn.Sequential(*list(resnet.children())[:7])
         self.backbone_l4 = nn.Sequential(*list(resnet.children())[7:8])
 
-        # Layer 3 CBAM
-        self.se_l3 = SEBlock(in_channels=1024, reduction=16) 
+        # Layer 3 SEBlock
+        self.se_l3 = SEBlock(in_channels=1024, reduction=16)
 
         self.reduce3 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
         self.reduce4 = nn.Conv2d(2048, 512, kernel_size=1, bias=False)
@@ -117,10 +119,9 @@ class ImageClassificationModel(nn.Module):
             nn.Linear(768, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.5)
+            nn.Dropout(p=0.4)
         )
         self.classifier = nn.Linear(512, num_classes)
-        self._init_weights()
 
     def forward(self, x):
 
@@ -140,22 +141,6 @@ class ImageClassificationModel(nn.Module):
         fused = torch.cat([p3, p4], dim=1)                 # [B, 1024]
         embeddings = self.embedding(fused)                 # [B, 512]
         return self.classifier(embeddings)
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(
-                    m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(
-                    m.weight, mode='fan_out', nonlinearity='leaky_relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.BatchNorm2d):
-                if m.weight is not None:
-                    nn.init.constant_(m.weight, 1)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
 
     def check_parameters(self):
         # Check the total number of trainable parameters in the model

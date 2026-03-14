@@ -1,6 +1,6 @@
 {
   "batch_size": 32,
-  "num_epochs": 50,
+  "num_epochs": 30,
   "learning_rate_backbone": 1e-4,
   "learning_rate_head": 5e-4,
   "num_classes": 100,
@@ -8,5 +8,5 @@
   "checkpoint_path": "./Model_Weight/checkpoint.pth",
   "best_model_path": "./Model_Weight/best_model.pth",
   "resume_training": false,
-  "early_stopping_patience": 50
+  "early_stopping_patience": 30
 }

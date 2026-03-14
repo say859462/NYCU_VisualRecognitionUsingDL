@@ -67,7 +67,7 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(448, scale=(0.75, 1.0)),
+        transforms.RandomResizedCrop(448, scale=(0.3, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(
             brightness=0.1,
