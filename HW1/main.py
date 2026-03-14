@@ -178,6 +178,7 @@ def main():
     # ==============================================================================
     start_epoch = 0
     best_val_acc = 0.0
+    best_val_loss = float('inf')
     epochs_no_improve = 0
     history = {'train_loss': [], 'val_loss': [],
                'train_acc': [], 'val_acc': []}
@@ -191,6 +192,7 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_acc = checkpoint['best_val_acc']
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         history = checkpoint['history']
 
         if 'scheduler_state_dict' in checkpoint:
@@ -237,8 +239,9 @@ def main():
             print(f"Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}%")
 
             # 5.5 Early Stopping & Model Saving Logic
-            if val_acc > best_val_acc:
+            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
                 best_val_acc = val_acc
+                best_val_loss = val_loss
                 epochs_no_improve = 0
                 best_val_preds, best_val_labels = val_preds, val_labels
                 torch.save(model.state_dict(), BEST_MODEL_PATH)
@@ -256,6 +259,7 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_acc': best_val_acc,
+                'best_val_loss': best_val_loss,
                 'history': history,
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,
