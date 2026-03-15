@@ -68,7 +68,7 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(448, scale=(0.5, 1.0)),
+        transforms.RandomResizedCrop(512, scale=(0.5, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
         RandomDiscreteRotation(angles=[0, 90, 270], weights=[0.7, 0.15, 0.15]),
         transforms.ColorJitter(
@@ -83,8 +83,8 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        transforms.Resize(600),
+        transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -129,7 +129,7 @@ def main():
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
     criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.0)  # label_smoothing=0.0
+        cb_weights=class_weights, gamma=2.0, label_smoothing=0.05)
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []
@@ -152,7 +152,7 @@ def main():
         {'params': model.fc_cbp.parameters(), 'lr': LR_HEAD},
         {'params': model.embedding.parameters(), 'lr': LR_HEAD},
         {'params': model.classifier.parameters(), 'lr': LR_HEAD}
-    ], weight_decay=3e-4)
+    ], weight_decay=2e-4)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR

@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import argparse
 import json
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
@@ -12,31 +13,34 @@ from model import ImageClassificationModel
 
 
 def main():
-
     parser = argparse.ArgumentParser(
-        description="Image Classification Model Testing")
-    parser.add_argument('--config', type=str, default='./config.json',
-                        help='Path to the JSON configuration file')
+        description="Final Inference for Codebench")
+    parser.add_argument('--config', type=str,
+                        default='./config.json', help='Path to config')
+    parser.add_argument('--model_path', type=str, default='./Model_Weight/16th/best_model.pth',
+                        help='Path to your best exp_16 model')
+    parser.add_argument('--img_size', type=int, default=512,
+                        help='Optimized crop size')
     args = parser.parse_args()
 
-    print(f"Loading configuration file....: {args.config}")
     with open(args.config, 'r') as f:
         config = json.load(f)
 
-    # Training Parameters
     BATCH_SIZE = config['batch_size']
     NUM_CLASSES = config['num_classes']
     DATA_DIR = config['data_dir']
-    BEST_MODEL_PATH = './Model_Weight/15th/best_model.pth'
     OUTPUT_CSV = "prediction.csv"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(
+        f"Device: {device} | TTA: 4-Crop Rotational | Resolution: {args.img_size}")
 
-    # Test Dataset and DataLoader
+    # ==========================================
+    # 採用實驗證實最穩定的 512 解析度配置
+    # ==========================================
     test_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        transforms.Resize(int(args.img_size * 1.15)),  # Resize 到約 600
+        transforms.CenterCrop(args.img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -44,58 +48,56 @@ def main():
 
     test_dataset = ImageDataset(
         root_dir=DATA_DIR, split="test", transform=test_transform)
-
     test_loader = DataLoader(
         test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
-    # Model
+    # 載入模型
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=False).to(device)
-
-    if os.path.exists(BEST_MODEL_PATH):
-        model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
-        print(f"Loading best model weight from: {BEST_MODEL_PATH}")
+    if os.path.exists(args.model_path):
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        print(f"✅ Successfully loaded: {args.model_path}")
     else:
-        raise FileNotFoundError(f"Couldn't find {BEST_MODEL_PATH}")
+        raise FileNotFoundError(f"Missing weight file at {args.model_path}")
 
-    # Inference
     model.eval()
     all_predictions = []
 
-    print("Predicting on test dataset with Safe TTA (Horizontal Flip Only)...")
+    print("🚀 Running Final 4-Crop Rotational TTA Inference...")
 
     with torch.no_grad():
-        for images, _ in tqdm(test_loader, desc="Predicting", colour="green"):
+        for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
 
-            # 取得 Logits
-            outputs_orig = model(images)
-            outputs_flipped = model(torch.flip(images, dims=[3]))
+            # --- 4-Crop Rotational TTA 核心實作 ---
+            # 1. 取得不同視角的 Logits
+            out_orig = model(images)
+            out_flip = model(torch.flip(images, dims=[3]))
+            out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
+            out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
 
-            # [關鍵修正]：轉成機率空間再做平均
-            prob_orig = torch.nn.functional.softmax(outputs_orig, dim=1)
-            prob_flipped = torch.nn.functional.softmax(outputs_flipped, dim=1)
+            # 2. 轉換至機率空間 (Softmax)
+            p0 = F.softmax(out_orig, dim=1)
+            p1 = F.softmax(out_flip, dim=1)
+            p2 = F.softmax(out_rot90, dim=1)
+            p3 = F.softmax(out_rot270, dim=1)
 
-            # 機率融合
-            probs = (prob_orig + prob_flipped) / 2.0
+            # 3. 平均融合 (Probabilistic Ensemble)
+            avg_probs = (p0 + p1 + p2 + p3) / 4.0
 
-            _, preds = torch.max(probs, 1)
+            _, preds = torch.max(avg_probs, 1)
             all_predictions.extend(preds.cpu().numpy())
 
-    # Generate submission CSV
-    # Extracting image names from the dataset's image paths
+    # 生成預測 CSV
     image_names = [os.path.splitext(os.path.basename(path))[
         0] for path in test_dataset.image_paths]
-
     submission_df = pd.DataFrame({
         'image_name': image_names,
         'pred_label': all_predictions
     })
 
     submission_df.to_csv(OUTPUT_CSV, index=False)
-    print(f"\n Submission saved to: {OUTPUT_CSV}")
-
-    print("\nPrediction Results Preview (First 5 Entries):")
+    print(f"\n🎉 Submission CSV saved: {OUTPUT_CSV}")
     print(submission_df.head())
 
 

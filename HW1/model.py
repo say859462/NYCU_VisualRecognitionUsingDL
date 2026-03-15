@@ -147,25 +147,25 @@ class ImageClassificationModel(nn.Module):
         # --- Layer 3 Processing ---
         self.se_l3 = SEBlock(in_channels=1024, reduction=16)
         self.reduce3 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
-        self.gem = GeM(p=3)
+        self.gem = GeM(p=4)
 
         # --- Layer 4 Processing ---
-        self.output_dim = 2048
+        self.output_dim = 4096
         self.cbp = CompactBilinearPooling(
             input_dim=2048, output_dim=self.output_dim)
 
         self.fc_cbp = nn.Sequential(
-            nn.Linear(2048, 512),
+            nn.Linear(4096, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-
+            nn.Dropout(p=0.2)
         )
 
         self.embedding = nn.Sequential(
             nn.Linear(1024, 512),  # Layer3(512) + Layer4_CBP(512)
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.3)
+            nn.Dropout(p=0.2)
         )
         self.classifier = nn.Linear(512, num_classes)
 

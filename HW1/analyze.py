@@ -1,14 +1,14 @@
 import torch
 import os
 import numpy as np
+import argparse
 from torch.utils.data import DataLoader
 from torchvision import transforms
-import torchvision.transforms.functional as TF  # <--- 加入 Tensor 旋轉模組
+import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
-
 from utils import (
     plot_class_distribution,
     plot_per_class_error,
@@ -19,22 +19,33 @@ from utils import (
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Model Analysis with TTA Options")
+    parser.add_argument('--tta', type=str, default='none', choices=['none', 'flip', 'rotational'],
+                        help='TTA mode: none, flip (Horizontal), rotational (4-Crop)')
+    parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
+                        help='Path to the model weights')
+    parser.add_argument('--config_name', type=str, default='16th',
+                        help='Name for the output directory')
+    parser.add_argument('--img_size', type=int, default=448,
+                        help='Crop size for inference')
+    args = parser.parse_args()
+
     # Parameters
     DATA_DIR = "./Dataset/data"
-    MODEL_PATH = "./Model_Weight/15th/best_model.pth"
     NUM_CLASSES = 100
     BATCH_SIZE = 16
-    PLOT_SAVE_DIR = "./Plot/15th/Flip_Safe_TTA_Analysis"
+    PLOT_SAVE_DIR = f"./Plot/{args.config_name}/{args.tta}_tta"
+    os.makedirs(PLOT_SAVE_DIR, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print(
+        f"Device: {device} | TTA Mode: {args.tta} | Image Size: {args.img_size}")
 
-    # ==========================================
-    # 回復為原始的推斷畫布大小 (576x576)
-    # ==========================================
+    # 推斷用的 Transform (可以根據需求調整 Resize 大小以榨取效能)
     val_transform = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        transforms.Resize(int(args.img_size * 1.15)),  # 保持比例縮放
+        transforms.CenterCrop(args.img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -42,72 +53,70 @@ def main():
 
     val_dataset = ImageDataset(
         root_dir=DATA_DIR, split="val", transform=val_transform)
-
     val_loader = DataLoader(
         val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
-    print("Loading train dataset to get class distribution for long-tail plot...")
+    print("Loading class distribution...")
     train_dataset = ImageDataset(
         root_dir=DATA_DIR, split="train", transform=None)
     train_labels = train_dataset.targets
 
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=False).to(device)
-
-    beta = 0.999
-    class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
-
-    effective_num = 1.0 - np.power(beta, class_sample_count)
-    effective_num = np.maximum(effective_num, 1e-8)
-    cb_weights = (1.0 - beta) / np.array(effective_num)
-    cb_weights = cb_weights / np.sum(cb_weights) * NUM_CLASSES
-
-    class_weights = torch.FloatTensor(cb_weights).to(device)
-    criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.0)
-
-    if os.path.exists(MODEL_PATH):
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-        print(f"Load the model from : {MODEL_PATH}")
+    if os.path.exists(args.model_path):
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
+        print(f"Loaded weights from: {args.model_path}")
     else:
-        print(f"Error: Couldn't find the model weight at {MODEL_PATH}.")
+        print(f"Error: Model not found at {args.model_path}")
         return
 
-    print("\nValidating the best model on validation set with 4-Crop Rotational TTA...")
+    # 初始化 Loss (用於分析)
+    class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
+    beta = 0.999
+    effective_num = 1.0 - np.power(beta, class_sample_count)
+    cb_weights = (1.0 - beta) / np.maximum(effective_num, 1e-8)
+    cb_weights = torch.FloatTensor(
+        cb_weights / np.sum(cb_weights) * NUM_CLASSES).to(device)
+    criterion = ClassBalancedFocalLoss(
+        cb_weights=cb_weights, gamma=2.0, label_smoothing=0.0)
 
-    # ==========================================
-    # 專屬 4-Crop 旋轉 TTA 驗證迴圈
-    # ==========================================
     model.eval()
-    running_loss = 0.0
-    correct_preds = 0
-    total_preds = 0
-    all_preds = []
-    all_labels = []
+    running_loss, correct_preds, total_preds = 0.0, 0, 0
+    all_preds, all_labels = [], []
 
     with torch.no_grad():
-        for images, labels in tqdm(val_loader, desc="4-Crop Rotational TTA Validating", colour="cyan"):
+        pbar = tqdm(val_loader, desc=f"Validating ({args.tta})", colour="cyan")
+        for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            # 1. 視角 A：原圖預測
-            outputs_orig = model(images)
+            # --- TTA 核心邏輯 ---
+            if args.tta == 'none':
+                outputs = model(images)
+                probs = torch.softmax(outputs, dim=1)
 
-            # 2. 視角 B：水平鏡像預測
-            images_flipped = torch.flip(images, dims=[3])
-            outputs_flipped = model(images_flipped)
+            elif args.tta == 'flip':
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                probs = (torch.softmax(out_orig, dim=1) +
+                         torch.softmax(out_flip, dim=1)) / 2.0
 
-            # =========================================================
-            # 機率融合 (Average Ensembling)
-            # =========================================================
-            outputs = (outputs_orig + outputs_flipped) / 2.0
+            elif args.tta == 'rotational':
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
+                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
 
-            loss = criterion(outputs, labels)
+                probs = (torch.softmax(out_orig, dim=1) +
+                         torch.softmax(out_flip, dim=1) +
+                         torch.softmax(out_rot90, dim=1) +
+                         torch.softmax(out_rot270, dim=1)) / 4.0
 
-            # 計算 Loss 時維持 batch_size 比例
+            # 使用融合後的機率計算 Loss 與預測
+            # 注意：CrossEntropy 通常接受 Logits，這裡為了分析方便使用 Log 機率
+            loss = criterion(torch.log(probs + 1e-9), labels)
             running_loss += loss.item() * images.size(0)
 
-            _, preds = torch.max(outputs, 1)
-
+            _, preds = torch.max(probs, 1)
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)
 
@@ -116,43 +125,22 @@ def main():
 
     val_loss = running_loss / total_preds
     val_acc = (correct_preds / total_preds) * 100
-    # ==========================================
 
-    print("\n" + "="*50)
     print(
-        f"🎉 [Rotational TTA Inference Result] Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
-    print("="*50 + "\n")
+        f"\n🎉 [{args.tta.upper()} TTA Result] Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
-    print("\nGenerating analysis plots...")
-
+    # --- 繪圖分析 ---
     train_path = os.path.join(DATA_DIR, "train")
     train_counts = plot_class_distribution(
-        data_dir=train_path, title="Train Set Statistics")
-
-    error_save_path = os.path.join(PLOT_SAVE_DIR, "val_per_class_error.png")
-    error_rates = plot_per_class_error(
-        all_preds, all_labels, num_classes=NUM_CLASSES, save_path=error_save_path
-    )
-
-    long_tail_save_path = os.path.join(PLOT_SAVE_DIR, "long_tail_acc.png")
-    plot_long_tail_accuracy(
-        train_labels=train_labels,
-        val_preds=all_preds,
-        val_labels=all_labels,
-        num_classes=NUM_CLASSES,
-        save_path=long_tail_save_path
-    )
-    print(f"Long-tail accuracy plot saved to {long_tail_save_path}")
+        data_dir=train_path, title="Train Set Statistics", output_path=PLOT_SAVE_DIR)
+    error_rates = plot_per_class_error(all_preds, all_labels, num_classes=NUM_CLASSES, save_path=os.path.join(
+        PLOT_SAVE_DIR, "per_class_error.png"))
+    plot_long_tail_accuracy(train_labels=train_labels, val_preds=all_preds,
+                            val_labels=all_labels, save_path=os.path.join(PLOT_SAVE_DIR, "long_tail.png"))
 
     if train_counts and error_rates:
-        corr_save_path = os.path.join(
-            PLOT_SAVE_DIR, "correlation_analysis.png")
-        plot_correlation_analysis(
-            train_counts, error_rates, output_path=corr_save_path)
-        print(
-            f"Correlation analysis completed. Plot saved to: {corr_save_path}")
-
-    print(f"\nAnalyze completed. Plots saved to {PLOT_SAVE_DIR}")
+        plot_correlation_analysis(train_counts, error_rates, output_path=os.path.join(
+            PLOT_SAVE_DIR, "correlation.png"))
 
 
 if __name__ == "__main__":
