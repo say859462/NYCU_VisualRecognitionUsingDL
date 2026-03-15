@@ -25,7 +25,7 @@ def main():
                         help='TTA mode: none, flip (Horizontal), rotational (4-Crop)')
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to the model weights')
-    parser.add_argument('--config_name', type=str, default='17th',
+    parser.add_argument('--config_name', type=str, default='18th',
                         help='Name for the output directory')
     parser.add_argument('--img_size', type=int, default=512,
                         help='Crop size for inference')
@@ -71,14 +71,7 @@ def main():
         return
 
     # 初始化 Loss (用於分析)
-    class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
-    beta = 0.999
-    effective_num = 1.0 - np.power(beta, class_sample_count)
-    cb_weights = (1.0 - beta) / np.maximum(effective_num, 1e-8)
-    cb_weights = torch.FloatTensor(
-        cb_weights / np.sum(cb_weights) * NUM_CLASSES).to(device)
-    criterion = ClassBalancedFocalLoss(
-        cb_weights=cb_weights, gamma=2.0, label_smoothing=0.0)
+    criterion = torch.nn.CrossEntropyLoss()
 
     model.eval()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
@@ -113,7 +106,7 @@ def main():
 
             # 使用融合後的機率計算 Loss 與預測
             # 注意：CrossEntropy 通常接受 Logits，這裡為了分析方便使用 Log 機率
-            loss = criterion(torch.log(probs + 1e-9), labels)
+            loss = criterion(outputs, labels)
             running_loss += loss.item() * images.size(0)
 
             _, preds = torch.max(probs, 1)

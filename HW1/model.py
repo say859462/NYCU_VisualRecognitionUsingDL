@@ -157,7 +157,7 @@ class ImageClassificationModel(nn.Module):
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True)
         )
-        self.gem = GeM(p=3.0)
+        self.gem = GeM(p=4.0)
 
         # --- Layer 4 Processing ---
         self.output_dim = 4096

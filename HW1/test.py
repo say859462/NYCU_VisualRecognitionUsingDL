@@ -14,13 +14,18 @@ from model import ImageClassificationModel
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Final Inference for Codebench")
+        description="Final Inference for Codebench with TTA Options")
     parser.add_argument('--config', type=str,
                         default='./config.json', help='Path to config')
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
-                        help='Path to your best exp_16 model')
+                        help='Path to your best model weights')
     parser.add_argument('--img_size', type=int, default=512,
                         help='Optimized crop size')
+    # 新增 TTA 模式參數
+    parser.add_argument('--tta', type=str, default='none',
+                        choices=['none', 'flip', 'rotational'],
+                        help='TTA mode: none, flip (Horizontal), rotational (4-Crop)')
+
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -33,13 +38,11 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(
-        f"Device: {device} | TTA: 4-Crop Rotational | Resolution: {args.img_size}")
+        f"Device: {device} | TTA Mode: {args.tta} | Resolution: {args.img_size}")
 
-    # ==========================================
-    # 採用實驗證實最穩定的 512 解析度配置
-    # ==========================================
+    # 推論前處理設定
     test_transform = transforms.Compose([
-        transforms.Resize(int(args.img_size * 1.15)),  # Resize 到約 600
+        transforms.Resize(int(args.img_size * 1.15)),
         transforms.CenterCrop(args.img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
@@ -63,27 +66,38 @@ def main():
     model.eval()
     all_predictions = []
 
-    print("🚀 Running Final 4-Crop Rotational TTA Inference...")
+    print(f"🚀 Running Final {args.tta.upper()} TTA Inference...")
 
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
 
-            # --- 4-Crop Rotational TTA 核心實作 ---
-            # 1. 取得不同視角的 Logits
-            out_orig = model(images)
-            out_flip = model(torch.flip(images, dims=[3]))
-            out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
-            out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
+            # --- TTA 整合邏輯 (參考 analyze.py 實作) ---
+            if args.tta == 'none':
+                # 無 TTA 模式
+                outputs = model(images)
+                avg_probs = F.softmax(outputs, dim=1)
 
-            # 2. 轉換至機率空間 (Softmax)
-            p0 = F.softmax(out_orig, dim=1)
-            p1 = F.softmax(out_flip, dim=1)
-            p2 = F.softmax(out_rot90, dim=1)
-            p3 = F.softmax(out_rot270, dim=1)
+            elif args.tta == 'flip':
+                # 水平翻轉 TTA
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                avg_probs = (F.softmax(out_orig, dim=1) +
+                             F.softmax(out_flip, dim=1)) / 2.0
 
-            # 3. 平均融合 (Probabilistic Ensemble)
-            avg_probs = (p0 + p1 + p2 + p3) / 4.0
+            elif args.tta == 'rotational':
+                # 4-Crop Rotational TTA (原本的實作)
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
+                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
+
+                p0 = F.softmax(out_orig, dim=1)
+                p1 = F.softmax(out_flip, dim=1)
+                p2 = F.softmax(out_rot90, dim=1)
+                p3 = F.softmax(out_rot270, dim=1)
+
+                avg_probs = (p0 + p1 + p2 + p3) / 4.0
 
             _, preds = torch.max(avg_probs, 1)
             all_predictions.extend(preds.cpu().numpy())

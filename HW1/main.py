@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, ClassBalancedFocalLoss, RandomDiscreteRotation
+from utils import LDAMLoss, plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, ClassBalancedFocalLoss, RandomDiscreteRotation
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -23,6 +23,7 @@ cudnn.benchmark = True
 
 # Progressively freeze layers during training to stabilize early training and allow fine-tuning in later epochs
 
+
 def get_optimizer(model, lr_base=1e-4, weight_decay=3e-4):
 
     for name, param in model.named_parameters():
@@ -31,20 +32,21 @@ def get_optimizer(model, lr_base=1e-4, weight_decay=3e-4):
         else:
             param.requires_grad = True
 
-
     allocated_params = set()
-    
-    backbone_l1_l3_params = [p for n, p in model.named_parameters() if "backbone_l1_l3" in n and p.requires_grad]
-    backbone_l4_params = [p for n, p in model.named_parameters() if "backbone_l4" in n and p.requires_grad]
-    
+
+    backbone_l1_l3_params = [p for n, p in model.named_parameters(
+    ) if "backbone_l1_l3" in n and p.requires_grad]
+    backbone_l4_params = [p for n, p in model.named_parameters(
+    ) if "backbone_l4" in n and p.requires_grad]
 
     allocated_params.update(id(p) for p in backbone_l1_l3_params)
     allocated_params.update(id(p) for p in backbone_l4_params)
 
-    head_params = [p for p in model.parameters() if p.requires_grad and id(p) not in allocated_params]
+    head_params = [p for p in model.parameters(
+    ) if p.requires_grad and id(p) not in allocated_params]
 
     param_groups = [
-        {'params': backbone_l1_l3_params, 'lr': lr_base * 0.1}, # Index 0
+        {'params': backbone_l1_l3_params, 'lr': lr_base * 0.1},  # Index 0
         {'params': backbone_l4_params, 'lr': lr_base},          # Index 1
         {'params': head_params, 'lr': lr_base * 5}              # Index 2
     ]
@@ -109,9 +111,10 @@ def main():
         ),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.12)),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.25, scale=(0.02, 0.2))
+
     ])
 
     val_transform = transforms.Compose([
@@ -128,10 +131,16 @@ def main():
         root_dir=DATA_DIR, split="val", transform=val_transform)
 
     train_loader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True, persistent_workers=True
     )
 
     # ==============================================================================
@@ -149,22 +158,30 @@ def main():
             param.requires_grad = True
 
     # 3.2 Loss Function : class-balance loss
-    beta = 0.999
     train_labels = train_dataset.targets
     class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
 
-    # Formula： (1 - beta) / (1 - beta^n)
+    # 預先計算 DRW 階段需要的 Class-Balanced 權重
+    beta = 0.999
     effective_num = 1.0 - np.power(beta, class_sample_count)
-    effective_num = np.maximum(effective_num, 1e-8)  # avoid division by zero
+    effective_num = np.maximum(effective_num, 1e-8)
     cb_weights = (1.0 - beta) / np.array(effective_num)
-    cb_weights = cb_weights / np.sum(cb_weights) * NUM_CLASSES  #
-
+    cb_weights = cb_weights / np.sum(cb_weights) * NUM_CLASSES
     class_weights = torch.FloatTensor(cb_weights).to(device)
-    criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.01)
+
+    # 階段 1 (Epoch 0~23)：不加權的 LDAM Loss (專注學習特徵)
+    criterion = LDAMLoss(
+        cls_num_list=class_sample_count,
+        max_m=0.5,
+        weight=None,  # 初始不給權重
+        s=30.0
+    ).to(device)
+
+    # 設定 DRW 啟動的 Epoch (通常設在總 Epoch 的 80% 處)
+    drw_epoch = int(NUM_EPOCHS * 0.6)
 
     # 3.3 Optimizer (Layer-wise LR)
-    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=3e-4)
+    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=5e-4)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
@@ -214,6 +231,8 @@ def main():
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         history = checkpoint['history']
 
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             print(" Loaded scheduler state.")
@@ -233,6 +252,10 @@ def main():
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
+
+            if epoch >= drw_epoch and criterion.weight is None:
+                print(f"🔥 [DRW Activated] activated (Class Re-Weighting)!")
+                criterion.weight = class_weights
 
             # 5.1 Train & Validate
             train_loss, train_acc = train_one_epoch(
@@ -283,6 +306,7 @@ def main():
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,
                 'best_val_labels': best_val_labels,
+                'scaler_state_dict': scaler.state_dict(),
             }
             torch.save(checkpoint_data, CHECKPOINT_PATH)
 
