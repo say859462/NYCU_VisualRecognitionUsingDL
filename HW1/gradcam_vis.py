@@ -59,8 +59,8 @@ def main():
 
     # 影像前處理定義
     preprocess_geo = transforms.Compose([
-        transforms.Resize(512),
-        transforms.CenterCrop(448)
+        transforms.Resize(600),
+        transforms.CenterCrop(512)
     ])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),

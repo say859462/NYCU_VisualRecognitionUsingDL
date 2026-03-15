@@ -23,8 +23,7 @@ cudnn.benchmark = True
 
 # Progressively freeze layers during training to stabilize early training and allow fine-tuning in later epochs
 
-
-def get_optimizer(model, lr_base=1e-4, weight_decay=4e-4):
+def get_optimizer(model, lr_base=1e-4, weight_decay=3e-4):
 
     for name, param in model.named_parameters():
         if "backbone_l1_l3.0" in name or "backbone_l1_l3.1" in name:  # Stem & Layer 1
@@ -32,19 +31,22 @@ def get_optimizer(model, lr_base=1e-4, weight_decay=4e-4):
         else:
             param.requires_grad = True
 
+
+    allocated_params = set()
+    
+    backbone_l1_l3_params = [p for n, p in model.named_parameters() if "backbone_l1_l3" in n and p.requires_grad]
+    backbone_l4_params = [p for n, p in model.named_parameters() if "backbone_l4" in n and p.requires_grad]
+    
+
+    allocated_params.update(id(p) for p in backbone_l1_l3_params)
+    allocated_params.update(id(p) for p in backbone_l4_params)
+
+    head_params = [p for p in model.parameters() if p.requires_grad and id(p) not in allocated_params]
+
     param_groups = [
-        {
-            'params': [p for n, p in model.named_parameters() if "backbone_l1_l3" in n and p.requires_grad],
-            'lr': lr_base * 0.1  # 1e-5
-        },
-        {
-            'params': [p for n, p in model.named_parameters() if "backbone_l4" in n],
-            'lr': lr_base        # 1e-4
-        },
-        {
-            'params': [p for n, p in model.named_parameters() if "head" in n or "fc" in n or "cbp" in n],
-            'lr': lr_base * 5    # 5e-4
-        }
+        {'params': backbone_l1_l3_params, 'lr': lr_base * 0.1}, # Index 0
+        {'params': backbone_l4_params, 'lr': lr_base},          # Index 1
+        {'params': head_params, 'lr': lr_base * 5}              # Index 2
     ]
 
     optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
@@ -162,14 +164,6 @@ def main():
         cb_weights=class_weights, gamma=2.0, label_smoothing=0.01)
 
     # 3.3 Optimizer (Layer-wise LR)
-    backbone_params = []
-    head_params = []
-    for name, param in model.named_parameters():
-        if 'backbone' in name:
-            backbone_params.append(param)
-        else:
-            head_params.append(param)
-
     optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=3e-4)
 
     # 3.4 Scheduler
