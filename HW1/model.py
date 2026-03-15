@@ -93,12 +93,10 @@ class CompactBilinearPooling(nn.Module):
     def forward(self, x):
         B, C, H, W = x.size()
 
-
         x_flat = x.view(B, C, -1).float()
 
         x1 = x_flat * self.s1.view(1, C, 1).float()
         x2 = x_flat * self.s2.view(1, C, 1).float()
-
 
         sketch1 = torch.zeros(B, self.output_dim, H * W,
                               dtype=torch.float32, device=x.device)
@@ -108,13 +106,11 @@ class CompactBilinearPooling(nn.Module):
                               dtype=torch.float32, device=x.device)
         sketch2.scatter_add_(1, self.h2.view(1, C, 1).expand(B, C, H * W), x2)
 
-
         fft1 = torch.fft.fft(sketch1, dim=1)
         fft2 = torch.fft.fft(sketch2, dim=1)
         fft_product = fft1 * fft2
 
         cbp = torch.fft.ifft(fft_product, dim=1).real
-
 
         cbp = cbp.to(x.dtype)
 
@@ -169,7 +165,7 @@ class ImageClassificationModel(nn.Module):
             nn.Linear(1024, 512),  # Layer3(512) + Layer4_CBP(512)
             nn.BatchNorm1d(512),
             nn.PReLU(),
-
+            nn.Dropout(p=0.3)
         )
         self.classifier = nn.Linear(512, num_classes)
 
