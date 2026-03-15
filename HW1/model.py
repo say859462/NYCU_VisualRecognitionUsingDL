@@ -3,10 +3,9 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
+
 # CBMA module
 # Reference: https://arxiv.org/pdf/1807.06521.pdf
-
-
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention, self).__init__()
@@ -78,8 +77,6 @@ class SEBlock(nn.Module):
 
 # Compact Bilinear Pooling Layer
 # Reference: https://arxiv.org/pdf/1506.02310.pdf
-
-
 class CompactBilinearPooling(nn.Module):
     def __init__(self, input_dim=2048, output_dim=8192):
         super(CompactBilinearPooling, self).__init__()
@@ -138,7 +135,14 @@ class GeM(nn.Module):
 
 
         return out.to(x.dtype)
-
+    
+class NormedLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(NormedLinear, self).__init__()
+        self.weight = nn.Parameter(torch.Tensor(in_features, out_features))
+        self.weight.data.uniform_(-1, 1).renorm_(2, 1, 1e-5).mul_(1e5)
+    def forward(self, x):
+        return torch.mm(F.normalize(x, p=2, dim=1), F.normalize(self.weight, p=2, dim=0))
 
 class ImageClassificationModel(nn.Module):
     def __init__(self, num_classes: int = 100, pretrained: bool = True):
@@ -157,7 +161,7 @@ class ImageClassificationModel(nn.Module):
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True)
         )
-        self.gem = GeM(p=4.0)
+        self.gem = GeM(p=3.5)
 
         # --- Layer 4 Processing ---
         self.output_dim = 4096
@@ -177,7 +181,8 @@ class ImageClassificationModel(nn.Module):
             nn.PReLU(),
             nn.Dropout(p=0.4)
         )
-        self.classifier = nn.Linear(512, num_classes)
+        
+        self.classifier = NormedLinear(512, num_classes)
 
     def forward(self, x):
         # Layer 3 pipeline

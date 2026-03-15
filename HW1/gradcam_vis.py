@@ -32,7 +32,7 @@ def main():
                         default=100, help='Number of classes')
 
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/18th', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/19th', help='Directory to save heatmaps')
 
     args = parser.parse_args()
 

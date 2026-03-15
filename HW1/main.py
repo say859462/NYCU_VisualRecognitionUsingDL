@@ -111,7 +111,7 @@ def main():
         ),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
-        transforms.RandomErasing(p=0.3, scale=(0.02, 0.12)),
+        transforms.RandomErasing(p=0.2, scale=(0.02, 0.12)),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
 
@@ -174,14 +174,14 @@ def main():
         cls_num_list=class_sample_count,
         max_m=0.5,
         weight=None,  # 初始不給權重
-        s=30.0
+        s=20.0
     ).to(device)
 
     # 設定 DRW 啟動的 Epoch (通常設在總 Epoch 的 80% 處)
     drw_epoch = int(NUM_EPOCHS * 0.6)
 
     # 3.3 Optimizer (Layer-wise LR)
-    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=5e-4)
+    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=3e-4)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
