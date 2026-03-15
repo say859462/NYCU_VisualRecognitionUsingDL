@@ -111,15 +111,10 @@ class CompactBilinearPooling(nn.Module):
         fft_product = fft1 * fft2
 
         cbp = torch.fft.ifft(fft_product, dim=1).real
-
-        cbp = cbp.to(x.dtype)
-
-        cbp = cbp.sum(dim=-1)  # shape: [B, output_dim]
-
+        cbp = cbp.sum(dim=-1)
         cbp = torch.sign(cbp) * torch.sqrt(torch.abs(cbp) + 1e-5)
         cbp = F.normalize(cbp, p=2, dim=1)
-
-        return cbp
+        return cbp.to(x.dtype)
 
 
 # GeM Pooling Layer(Generalized Mean Pooling)
@@ -127,11 +122,22 @@ class CompactBilinearPooling(nn.Module):
 class GeM(nn.Module):
     def __init__(self, p=3, eps=1e-6):
         super(GeM, self).__init__()
-        self.p = nn.Parameter(torch.ones(1) * p)
+        self.p = nn.Parameter(torch.ones(1) * float(p))
         self.eps = eps
 
     def forward(self, x):
-        return F.avg_pool2d(x.clamp(min=self.eps).pow(self.p), (x.size(-2), x.size(-1))).pow(1./self.p)
+
+        x_float = x.float()
+        p_float = self.p.float()
+
+
+        out = F.avg_pool2d(
+            x_float.clamp(min=self.eps).pow(p_float),
+            (x_float.size(-2), x_float.size(-1))
+        ).pow(1.0 / p_float)
+
+
+        return out.to(x.dtype)
 
 
 class ImageClassificationModel(nn.Module):
@@ -146,8 +152,12 @@ class ImageClassificationModel(nn.Module):
 
         # --- Layer 3 Processing ---
         self.se_l3 = SEBlock(in_channels=1024, reduction=16)
-        self.reduce3 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
-        self.gem = GeM(p=3)
+        self.reduce3 = nn.Sequential(
+            nn.Conv2d(1024, 512, kernel_size=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        self.gem = GeM(p=3.0)
 
         # --- Layer 4 Processing ---
         self.output_dim = 4096
@@ -158,14 +168,14 @@ class ImageClassificationModel(nn.Module):
             nn.Linear(4096, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.2)
+            nn.Dropout(p=0.4)
         )
 
         self.embedding = nn.Sequential(
             nn.Linear(1024, 512),  # Layer3(512) + Layer4_CBP(512)
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(p=0.2)
+            nn.Dropout(p=0.4)
         )
         self.classifier = nn.Linear(512, num_classes)
 

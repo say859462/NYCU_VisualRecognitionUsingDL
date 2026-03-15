@@ -17,7 +17,7 @@ def main():
         description="Final Inference for Codebench")
     parser.add_argument('--config', type=str,
                         default='./config.json', help='Path to config')
-    parser.add_argument('--model_path', type=str, default='./Model_Weight/16th/best_model.pth',
+    parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to your best exp_16 model')
     parser.add_argument('--img_size', type=int, default=512,
                         help='Optimized crop size')

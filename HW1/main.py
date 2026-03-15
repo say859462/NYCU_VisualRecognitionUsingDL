@@ -21,6 +21,35 @@ import random
 import torch.backends.cudnn as cudnn
 cudnn.benchmark = True
 
+# Progressively freeze layers during training to stabilize early training and allow fine-tuning in later epochs
+
+
+def get_optimizer(model, lr_base=1e-4, weight_decay=4e-4):
+
+    for name, param in model.named_parameters():
+        if "backbone_l1_l3.0" in name or "backbone_l1_l3.1" in name:  # Stem & Layer 1
+            param.requires_grad = False
+        else:
+            param.requires_grad = True
+
+    param_groups = [
+        {
+            'params': [p for n, p in model.named_parameters() if "backbone_l1_l3" in n and p.requires_grad],
+            'lr': lr_base * 0.1  # 1e-5
+        },
+        {
+            'params': [p for n, p in model.named_parameters() if "backbone_l4" in n],
+            'lr': lr_base        # 1e-4
+        },
+        {
+            'params': [p for n, p in model.named_parameters() if "head" in n or "fc" in n or "cbp" in n],
+            'lr': lr_base * 5    # 5e-4
+        }
+    ]
+
+    optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
+    return optimizer
+
 
 def main():
 
@@ -41,8 +70,9 @@ def main():
     # 1.1 Hyperparameters
     BATCH_SIZE = config['batch_size']
     NUM_EPOCHS = config['num_epochs']
-    LR_BACKBONE = config.get('learning_rate_backbone', 1e-4)
-    LR_HEAD = config.get('learning_rate_head', 5e-4)
+    # LR_BACKBONE = config.get('learning_rate_backbone', 1e-4)
+    # LR_HEAD = config.get('learning_rate_head', 5e-4)
+    LR_BASE = config.get('learning_rate', 1e-4)
     EARLY_STOPPING_PATIENCE = config.get('early_stopping_patience', 5)
 
     # 1.2 Dataset & Paths
@@ -68,7 +98,7 @@ def main():
     # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.5, 1.0)),
+        transforms.RandomResizedCrop(512, scale=(0.3, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
         RandomDiscreteRotation(angles=[0, 90, 270], weights=[0.7, 0.15, 0.15]),
         transforms.ColorJitter(
@@ -109,12 +139,12 @@ def main():
     model = ImageClassificationModel(
         num_classes=100, pretrained=True).to(device)
 
-    for param in model.backbone_l1_l3[:5].parameters():
-        param.requires_grad = False
-    for param in model.backbone_l1_l3[5:].parameters():
-        param.requires_grad = True
-    for param in model.backbone_l4.parameters():
-        param.requires_grad = True
+    for name, param in model.named_parameters():
+        if "backbone_l1_l3.0" in name or "backbone_l1_l3.1" in name:
+            # 僅凍結最基礎的 Stem. Only freeze the very first two layers (stem) to allow fine-tuning of deeper layers
+            param.requires_grad = False
+        else:
+            param.requires_grad = True
 
     # 3.2 Loss Function : class-balance loss
     beta = 0.999
@@ -129,7 +159,7 @@ def main():
 
     class_weights = torch.FloatTensor(cb_weights).to(device)
     criterion = ClassBalancedFocalLoss(
-        cb_weights=class_weights, gamma=2.0, label_smoothing=0.05)
+        cb_weights=class_weights, gamma=2.0, label_smoothing=0.0)
 
     # 3.3 Optimizer (Layer-wise LR)
     backbone_params = []
@@ -140,19 +170,7 @@ def main():
         else:
             head_params.append(param)
 
-    optimizer = optim.AdamW([
-        # --- Backbone Params---
-        {'params': model.backbone_l1_l3[5:].parameters(), 'lr': LR_BACKBONE},
-        {'params': model.backbone_l4.parameters(), 'lr': LR_BACKBONE},
-
-        # --- Head & Attention Params ---
-        {'params': model.se_l3.parameters(), 'lr': LR_HEAD},
-        {'params': model.gem.parameters(), 'lr': LR_HEAD},
-        {'params': model.reduce3.parameters(), 'lr': LR_HEAD},
-        {'params': model.fc_cbp.parameters(), 'lr': LR_HEAD},
-        {'params': model.embedding.parameters(), 'lr': LR_HEAD},
-        {'params': model.classifier.parameters(), 'lr': LR_HEAD}
-    ], weight_decay=3e-4)
+    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=3e-4)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR

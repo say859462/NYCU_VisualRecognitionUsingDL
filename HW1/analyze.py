@@ -25,9 +25,9 @@ def main():
                         help='TTA mode: none, flip (Horizontal), rotational (4-Crop)')
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to the model weights')
-    parser.add_argument('--config_name', type=str, default='16th',
+    parser.add_argument('--config_name', type=str, default='17th',
                         help='Name for the output directory')
-    parser.add_argument('--img_size', type=int, default=448,
+    parser.add_argument('--img_size', type=int, default=512,
                         help='Crop size for inference')
     args = parser.parse_args()
 
