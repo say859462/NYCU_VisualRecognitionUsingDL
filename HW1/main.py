@@ -174,7 +174,7 @@ def main():
         cls_num_list=class_sample_count,
         max_m=0.5,
         weight=None,  # 初始不給權重
-        s=20.0
+        s=25.0
     ).to(device)
 
     # 設定 DRW 啟動的 Epoch (通常設在總 Epoch 的 80% 處)
