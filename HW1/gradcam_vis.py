@@ -105,9 +105,9 @@ def main():
                     outputs, spatial_attn = model(
                         input_tensor, return_attn=True)
 
-                    T = 2.5
+                    s = 20.0  # 必須與 main.py 中的 LDAMLoss 設定一致
                     probabilities = torch.nn.functional.softmax(
-                        outputs / T, dim=1)[0]
+                        outputs * s, dim=1)[0]
 
                     pred_class = probabilities.argmax().item()
                     pred_score = probabilities[pred_class].item()

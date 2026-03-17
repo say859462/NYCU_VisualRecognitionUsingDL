@@ -127,7 +127,7 @@ class LDAMLoss(nn.Module):
         output = torch.where(index, x_m, x)
 
         # 計算 Cross Entropy，此處可傳入 weight 以支援 DRW
-        return F.cross_entropy(self.s * output, target, weight=self.weight, label_smoothing=0.1)
+        return F.cross_entropy(self.s * output, target, weight=self.weight, label_smoothing=0.05)
 
 
 class ProcessCrops:

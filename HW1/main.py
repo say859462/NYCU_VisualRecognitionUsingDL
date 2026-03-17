@@ -172,13 +172,13 @@ def main():
     # 階段 1 (Epoch 0~23)：不加權的 LDAM Loss (專注學習特徵)
     criterion = LDAMLoss(
         cls_num_list=class_sample_count,
-        max_m=0.5,
+        max_m=0.6,
         weight=None,  # 初始不給權重
         s=20.0
     ).to(device)
 
     # 設定 DRW 啟動的 Epoch
-    drw_epoch = int(NUM_EPOCHS * 0.5)
+    drw_epoch = int(NUM_EPOCHS * 0.5)  # 在訓練的 60% 時啟動 DRW 和 Attention Crop
 
     # 3.3 Optimizer (Layer-wise LR)
     optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=1e-3)
