@@ -10,35 +10,44 @@ import random
 import torchvision.transforms.functional as TF
 
 
-def get_attention_crops(images, attn_maps, threshold=0.6):
+def get_attention_crops(images, activation_maps, threshold=0.6):
     """
-    基於注意力圖進行局部裁切 (配合 Experiment 21 混合架構)
+    基於語義激發圖 (Activation Map) 進行局部裁切，並加上邊緣 Padding
     """
     B, C, H, W = images.shape
-    # 將注意力圖縮放至原始影像大小
-    attn_resized = F.interpolate(attn_maps, size=(
-        H, W), mode='bilinear', align_corners=False)
+    # 將激發圖縮放至原始影像大小
+    attn_resized = F.interpolate(activation_maps, size=(H, W), mode='bilinear', align_corners=False)
 
     cropped_images = torch.zeros_like(images)
     for i in range(B):
-        # 尋找高於閾值的區域
-        mask = attn_resized[i, 0] > (attn_resized[i, 0].max() * threshold)
-        coords = torch.nonzero(mask)
+        # 歸一化激發圖並進行閾值過濾
+        mask = attn_resized[i, 0]
+        mask = (mask - mask.min()) / (mask.max() - mask.min() + 1e-8)
+        binary_mask = mask > threshold
+        coords = torch.nonzero(binary_mask)
 
-        if coords.size(0) > 10:  # 確保有抓到足夠的像素
+        if coords.size(0) > 10:  
             ymin, xmin = coords.min(dim=0)[0]
             ymax, xmax = coords.max(dim=0)[0]
 
-            # 確保裁切區域不會過小 (避免放大後過度模糊)
+            # ⭐ 核心改動：加入 15% 的 Padding，保留生物的觸角與翅膀邊緣！
+            pad_y = int((ymax - ymin) * 0.15)
+            pad_x = int((xmax - xmin) * 0.15)
+            
+            ymin = max(0, ymin - pad_y)
+            xmin = max(0, xmin - pad_x)
+            ymax = min(H - 1, ymax + pad_y)
+            xmax = min(W - 1, xmax + pad_x)
+
+            # 確保裁切區域不會過小
             if (ymax - ymin) < H // 4 or (xmax - xmin) < W // 4:
                 cropped_images[i] = images[i]
             else:
                 crop = images[i:i+1, :, ymin:ymax+1, xmin:xmax+1]
-                cropped_images[i] = F.interpolate(
-                    crop, size=(H, W), mode='bilinear')[0]
+                cropped_images[i] = F.interpolate(crop, size=(H, W), mode='bilinear')[0]
         else:
             cropped_images[i] = images[i]
-
+            
     return cropped_images
 
 # Custom utilities for training, analysis, and visualization

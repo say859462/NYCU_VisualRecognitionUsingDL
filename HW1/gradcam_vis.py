@@ -8,6 +8,7 @@ import random
 import argparse
 from torchvision import transforms
 from tqdm import tqdm
+import torch.nn.functional as F  # ⭐ 新增：用於特徵圖插值放大
 
 # 載入你寫好的模型
 from model import ImageClassificationModel
@@ -19,7 +20,7 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Dual-layer Grad-CAM Visualization for All Classes")
+        description="Dual-layer Grad-CAM & RSA Visualization for All Classes")
     parser.add_argument('--val_dir', type=str, default='./Dataset/data/val',
                         help='Path to the validation dataset root directory')
     parser.add_argument('--num_samples_per_class', type=int, default=3,
@@ -32,7 +33,7 @@ def main():
                         default=100, help='Number of classes')
 
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/20th', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/21th', help='Directory to save heatmaps')
 
     args = parser.parse_args()
 
@@ -53,9 +54,8 @@ def main():
 
     model.eval()
 
-    # 3. 初始化雙重 Grad-CAM 物件 (鎖定全新的平行注意力模組)
-    cam_l3 = GradCAM(model=model, target_layers=[model.se_l3])  # 這裡改成 se_l3
-    cam_l4 = GradCAM(model=model, target_layers=[model.backbone_l4[-1]])
+    # 3. 初始化 Layer 3 的 Grad-CAM (淺層看紋理，依然好用且不受 CBP 嚴重污染)
+    cam_l3 = GradCAM(model=model, target_layers=[model.reduce3])
 
     # 影像前處理定義
     preprocess_geo = transforms.Compose([
@@ -99,9 +99,11 @@ def main():
                     cropped_img).unsqueeze(0).to(device)
                 rgb_img = np.float32(cropped_img) / 255.0
 
-                # 取得預測結果
+                # 取得預測結果與 ⭐內建 RSA 空間權重
                 with torch.no_grad():
-                    outputs = model(input_tensor)
+                    # 啟動 return_attn=True，拿回 spatial_attn (Shape: [1, 1, 14, 14])
+                    outputs, spatial_attn = model(
+                        input_tensor, return_attn=True)
 
                     scaled_outputs = outputs * 20.0
 
@@ -116,11 +118,16 @@ def main():
                 vis_l3 = show_cam_on_image(
                     rgb_img, grayscale_cam_l3, use_rgb=True)
 
-                # 執行 Layer 4 Grad-CAM
-                grayscale_cam_l4 = cam_l4(
-                    input_tensor=input_tensor, targets=None)[0, :]
-                vis_l4 = show_cam_on_image(
-                    rgb_img, grayscale_cam_l4, use_rgb=True)
+                # ⭐ 執行 Layer 4 RSA 內部權重視覺化 (放棄容易受雜訊干擾的 Grad-CAM)
+                # 將 14x14 的注意力圖插值放大到 512x512
+                attn_map = F.interpolate(spatial_attn, size=(
+                    512, 512), mode='bilinear', align_corners=False)
+                attn_map = attn_map.squeeze().cpu().numpy()
+
+                # 歸一化權重到 0~1 之間以便繪製熱力圖
+                attn_map = (attn_map - attn_map.min()) / \
+                    (attn_map.max() - attn_map.min() + 1e-8)
+                vis_l4_rsa = show_cam_on_image(rgb_img, attn_map, use_rgb=True)
 
                 # 繪製 1x3 並排對比圖
                 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -137,12 +144,13 @@ def main():
 
                 # [子圖 2] Layer 3 注意力 (紋理與細節)
                 axes[1].imshow(vis_l3)
-                axes[1].set_title("Layer 3: Local Details", fontsize=14)
+                axes[1].set_title(
+                    "Layer 3: Local Details (Grad-CAM)", fontsize=14)
                 axes[1].axis('off')
 
-                # [子圖 3] Layer 4 注意力 (輪廓與語義)
-                axes[2].imshow(vis_l4)
-                axes[2].set_title("Layer 4: Global Semantics", fontsize=14)
+                # [子圖 3] Layer 4 注意力 (真正的空間遮罩)
+                axes[2].imshow(vis_l4_rsa)
+                axes[2].set_title("Layer 4: Semantic Activation Map", fontsize=14)
                 axes[2].axis('off')
 
                 plt.tight_layout()
@@ -152,13 +160,16 @@ def main():
                 save_path = os.path.join(
                     class_save_dir, f"dual_cam_{base_filename}.png")
                 plt.savefig(save_path)
-                plt.close()
+
+                # 釋放記憶體，避免大量圖片導致 RAM / VRAM 爆炸
+                plt.close(fig)
+                del input_tensor, outputs, scaled_outputs, probabilities, spatial_attn, attn_map
 
             except Exception as e:
                 print(f"\nError processing {img_path}: {e}")
 
     print(
-        f"\nAll done! Dual-CAM heatmaps are categorized by class in: {args.save_dir}")
+        f"\nAll done! Visualizations are categorized by class in: {args.save_dir}")
 
 
 if __name__ == '__main__':

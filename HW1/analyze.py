@@ -26,7 +26,7 @@ def main():
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to the model weights')
 
-    parser.add_argument('--config_name', type=str, default='20th',
+    parser.add_argument('--config_name', type=str, default='21th',
                         help='Name for the output directory')
 
     parser.add_argument('--img_size', type=int, default=512,

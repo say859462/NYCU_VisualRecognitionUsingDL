@@ -172,7 +172,7 @@ def main():
     # 階段 1 (Epoch 0~23)：不加權的 LDAM Loss (專注學習特徵)
     criterion = LDAMLoss(
         cls_num_list=class_sample_count,
-        max_m=0.5,
+        max_m=0.35,
         weight=None,  # 初始不給權重
         s=20.0
     ).to(device)
