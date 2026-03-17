@@ -235,7 +235,7 @@ class ImageClassificationModel(nn.Module):
 
         # 推論/驗證階段：自動平均兩個分類頭，Val/Test 腳本不需任何修改！
         else:
-            logits_ensemble = (logits_cbp + logits_gem) / 2.0
+            logits_ensemble = (logits_cbp * 0.8 + logits_gem * 0.2)
             if return_attn:
                 activation_map = torch.mean(f4_att, dim=1, keepdim=True)
                 return logits_ensemble, activation_map

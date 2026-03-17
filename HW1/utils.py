@@ -30,9 +30,9 @@ def get_attention_crops(images, activation_maps, threshold=0.6):
             ymin, xmin = coords.min(dim=0)[0]
             ymax, xmax = coords.max(dim=0)[0]
 
-            # ⭐ 核心改動：加入 15% 的 Padding，保留生物的觸角與翅膀邊緣！
-            pad_y = int((ymax - ymin) * 0.15)
-            pad_x = int((xmax - xmin) * 0.15)
+
+            pad_y = int((ymax - ymin) * 0.1)
+            pad_x = int((xmax - xmin) * 0.1)
             
             ymin = max(0, ymin - pad_y)
             xmin = max(0, xmin - pad_x)

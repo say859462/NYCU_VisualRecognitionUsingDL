@@ -20,34 +20,33 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device, scaler, m
                 logits_cbp_full, logits_gem_full, activation_maps = model(images, return_attn=True)
                 loss_cbp_full = criterion(logits_cbp_full, labels)
                 loss_gem_full = criterion(logits_gem_full, labels)
-                # 組合 Loss：CBP 是主幹，GeM 負責輔助定位 (權重 0.5)
-                loss_full = (loss_cbp_full + 0.5 * loss_gem_full) / 2.0
+                # 組合 Loss：CBP 是主幹，GeM 負責輔助定位 (權重 0.3)
+                loss_full = (loss_cbp_full + 0.3 * loss_gem_full) / 1.3
                 
                 scaler.scale(loss_full).backward() # 立即釋放計算圖
 
                 # --- 階段 2：生成裁切圖 ---
                 with torch.no_grad():
-                    cropped_imgs = get_attention_crops(images, activation_maps.detach(), threshold=0.6)
+                    cropped_imgs = get_attention_crops(images, activation_maps.detach(), threshold=0.5)
                 
                 # --- 階段 3：局部特徵圖 Pass ---
                 logits_cbp_crop, logits_gem_crop = model(cropped_imgs)
                 loss_cbp_crop = criterion(logits_cbp_crop, labels)
                 loss_gem_crop = criterion(logits_gem_crop, labels)
-                loss_crop = (loss_cbp_crop + 0.5 * loss_gem_crop) / 2.0
+                loss_crop = (loss_cbp_crop + 0.3 * loss_gem_crop) / 1.3
                 
                 scaler.scale(loss_crop).backward()
 
                 loss = loss_full + loss_crop
-                outputs = (logits_cbp_full + logits_gem_full) / 2.0 # 用全域圖算 Accuracy
+                outputs = (logits_cbp_full * 0.8 + logits_gem_full * 0.2) # 用全域圖算 Accuracy
             else:
                 # 未開啟裁切的普通訓練
                 logits_cbp, logits_gem = model(images)
                 loss_cbp = criterion(logits_cbp, labels)
                 loss_gem = criterion(logits_gem, labels)
-                loss = loss_cbp + 0.5 * loss_gem
-
+                loss = (loss_cbp + 0.3 * loss_gem) / 1.3
                 scaler.scale(loss).backward()
-                outputs = (logits_cbp + logits_gem) / 2.0
+                outputs = (logits_cbp * 0.8 + logits_gem * 0.2)
 
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)

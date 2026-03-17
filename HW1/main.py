@@ -48,7 +48,7 @@ def get_optimizer(model, lr_base=1e-4, weight_decay=3e-4):
     param_groups = [
         {'params': backbone_l1_l3_params, 'lr': lr_base * 0.1},  # Index 0
         {'params': backbone_l4_params, 'lr': lr_base * 0.5},          # Index 1
-        {'params': head_params, 'lr': lr_base * 5}              # Index 2
+        {'params': head_params, 'lr': lr_base * 3}              # Index 2
     ]
 
     optimizer = optim.AdamW(param_groups, weight_decay=weight_decay)
@@ -111,7 +111,7 @@ def main():
         ),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
-        transforms.RandomErasing(p=0.15, scale=(0.02, 0.08)),
+        transforms.RandomErasing(p=0.1, scale=(0.02, 0.08)),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
 
@@ -172,7 +172,7 @@ def main():
     # 階段 1 (Epoch 0~23)：不加權的 LDAM Loss (專注學習特徵)
     criterion = LDAMLoss(
         cls_num_list=class_sample_count,
-        max_m=0.35,
+        max_m=0.4,
         weight=None,  # 初始不給權重
         s=20.0
     ).to(device)
@@ -181,7 +181,7 @@ def main():
     drw_epoch = int(NUM_EPOCHS * 0.5)
 
     # 3.3 Optimizer (Layer-wise LR)
-    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=3e-4)
+    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=1e-3)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
@@ -189,7 +189,7 @@ def main():
     cosine_epochs = NUM_EPOCHS - warmup_epochs
     warmup_sch = LinearLR(
         optimizer,
-        start_factor=0.5,
+        start_factor=0.1,
         total_iters=warmup_epochs
     )
     cosine_sch = CosineAnnealingLR(
@@ -262,7 +262,7 @@ def main():
             enable_crop = (epoch >= drw_epoch)
             if enable_crop and epoch == drw_epoch:
                 print(f" [Attention Crop] activated!")
-            
+
             # 5.1 Train & Validate
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, device, scaler, use_crop=enable_crop)

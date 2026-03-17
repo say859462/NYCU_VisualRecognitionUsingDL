@@ -33,7 +33,7 @@ def main():
                         default=100, help='Number of classes')
 
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/21th', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/22th', help='Directory to save heatmaps')
 
     args = parser.parse_args()
 
@@ -105,10 +105,10 @@ def main():
                     outputs, spatial_attn = model(
                         input_tensor, return_attn=True)
 
-                    scaled_outputs = outputs * 20.0
-
+                    T = 2.5
                     probabilities = torch.nn.functional.softmax(
-                        scaled_outputs, dim=1)[0]
+                        outputs / T, dim=1)[0]
+
                     pred_class = probabilities.argmax().item()
                     pred_score = probabilities[pred_class].item()
 
@@ -150,7 +150,8 @@ def main():
 
                 # [子圖 3] Layer 4 注意力 (真正的空間遮罩)
                 axes[2].imshow(vis_l4_rsa)
-                axes[2].set_title("Layer 4: Semantic Activation Map", fontsize=14)
+                axes[2].set_title(
+                    "Layer 4: Semantic Activation Map", fontsize=14)
                 axes[2].axis('off')
 
                 plt.tight_layout()
