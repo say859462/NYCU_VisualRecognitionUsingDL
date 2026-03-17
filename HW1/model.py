@@ -111,7 +111,11 @@ class ImageClassificationModel(nn.Module):
 
         f4_raw = self.backbone_l4(f3_raw)
         # 空間注意力與主體特徵
-        spatial_attn = self.rsa.sigmoid(self.rsa.conv1(torch.cat([torch.mean(f4_raw, 1, True), torch.max(f4_raw, 1, True)[0].unsqueeze(1)], 1)))
+        avg_out = torch.mean(f4_raw, dim=1, keepdim=True)
+        max_out, _ = torch.max(f4_raw, dim=1, keepdim=True)
+        x_cat = torch.cat([avg_out, max_out], dim=1)
+        spatial_attn = self.rsa.sigmoid(self.rsa.conv1(x_cat))
+        
         f4_att = f4_raw * (1 + spatial_attn)
 
         f4_reduced = self.reduce4(f4_att)
