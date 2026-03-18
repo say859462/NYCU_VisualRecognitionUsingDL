@@ -178,7 +178,7 @@ def main():
     ).to(device)
 
     # 設定 DRW 啟動的 Epoch
-    drw_epoch = 20 # 在訓練的 60% 時啟動 DRW 和 Attention Crop
+    drw_epoch = int(NUM_EPOCHS * 0.5) # 在訓練的 60% 時啟動 DRW 和 Attention Crop
 
     # 3.3 Optimizer (Layer-wise LR)
     optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=2e-3)
