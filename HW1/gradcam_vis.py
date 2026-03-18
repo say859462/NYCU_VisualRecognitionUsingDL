@@ -33,7 +33,7 @@ def main():
                         default=100, help='Number of classes')
 
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/22th', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/23th', help='Directory to save heatmaps')
 
     args = parser.parse_args()
 
@@ -105,9 +105,8 @@ def main():
                     outputs, spatial_attn = model(
                         input_tensor, return_attn=True)
 
-                    s = 20.0  # 必須與 main.py 中的 LDAMLoss 設定一致
-                    probabilities = torch.nn.functional.softmax(
-                        outputs * s, dim=1)[0]
+                    probabilities = torch.nn.functional.softmax(outputs, dim=1)[
+                        0]
 
                     pred_class = probabilities.argmax().item()
                     pred_score = probabilities[pred_class].item()
@@ -164,7 +163,7 @@ def main():
 
                 # 釋放記憶體，避免大量圖片導致 RAM / VRAM 爆炸
                 plt.close(fig)
-                del input_tensor, outputs, scaled_outputs, probabilities, spatial_attn, attn_map
+                del input_tensor, outputs, probabilities, spatial_attn, attn_map
 
             except Exception as e:
                 print(f"\nError processing {img_path}: {e}")

@@ -16,7 +16,8 @@ def get_attention_crops(images, activation_maps, threshold=0.6):
     """
     B, C, H, W = images.shape
     # 將激發圖縮放至原始影像大小
-    attn_resized = F.interpolate(activation_maps, size=(H, W), mode='bilinear', align_corners=False)
+    attn_resized = F.interpolate(activation_maps, size=(
+        H, W), mode='bilinear', align_corners=False)
 
     cropped_images = torch.zeros_like(images)
     for i in range(B):
@@ -26,14 +27,13 @@ def get_attention_crops(images, activation_maps, threshold=0.6):
         binary_mask = mask > threshold
         coords = torch.nonzero(binary_mask)
 
-        if coords.size(0) > 10:  
+        if coords.size(0) > 10:
             ymin, xmin = coords.min(dim=0)[0]
             ymax, xmax = coords.max(dim=0)[0]
 
-
             pad_y = int((ymax - ymin) * 0.1)
             pad_x = int((xmax - xmin) * 0.1)
-            
+
             ymin = max(0, ymin - pad_y)
             xmin = max(0, xmin - pad_x)
             ymax = min(H - 1, ymax + pad_y)
@@ -44,10 +44,11 @@ def get_attention_crops(images, activation_maps, threshold=0.6):
                 cropped_images[i] = images[i]
             else:
                 crop = images[i:i+1, :, ymin:ymax+1, xmin:xmax+1]
-                cropped_images[i] = F.interpolate(crop, size=(H, W), mode='bilinear')[0]
+                cropped_images[i] = F.interpolate(
+                    crop, size=(H, W), mode='bilinear')[0]
         else:
             cropped_images[i] = images[i]
-            
+
     return cropped_images
 
 # Custom utilities for training, analysis, and visualization
@@ -126,7 +127,7 @@ class LDAMLoss(nn.Module):
         output = torch.where(index, x_m, x)
 
         # 計算 Cross Entropy，此處可傳入 weight 以支援 DRW
-        return F.cross_entropy(self.s * output, target, weight=self.weight, label_smoothing=0.05)
+        return F.cross_entropy(self.s * output, target, weight=self.weight, label_smoothing=0.01)
 
 
 class ProcessCrops:
