@@ -9,6 +9,88 @@ from torchvision import transforms
 import random
 import torchvision.transforms.functional as TF
 
+# --- 新增：Center Loss (特徵中心損失) ---
+
+
+class CenterLoss(nn.Module):
+    def __init__(self, num_classes=100, feat_dim=2048):
+        super(CenterLoss, self).__init__()
+        self.num_classes = num_classes
+        self.feat_dim = feat_dim
+        self.centers = nn.Parameter(
+            torch.randn(self.num_classes, self.feat_dim))
+
+    def forward(self, x, labels):
+        """
+        x: feature matrix with shape (batch_size, feat_dim).
+        labels: ground truth labels with shape (batch_size).
+        """
+        batch_size = x.size(0)
+        distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
+            torch.pow(self.centers, 2).sum(dim=1, keepdim=True).expand(
+                self.num_classes, batch_size).t()
+        distmat.addmm_(x, self.centers.t(), beta=1, alpha=-2)
+
+        classes = torch.arange(self.num_classes).long().to(x.device)
+        labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
+        mask = labels.eq(classes.expand(batch_size, self.num_classes))
+
+        dist = distmat * mask.float()
+        loss = dist.clamp(min=1e-12, max=1e+12).sum() / batch_size
+        return loss
+
+# --- 升級：Similarity-based LDAM Loss + OHEM ---
+
+
+class SimilarityLDAMLoss(nn.Module):
+    def __init__(self, cls_num_list, max_m=0.45, s=20.0, alpha=0.1, keep_ratio=0.7):
+        """
+        alpha: Soft label 的權重 (0.1 代表 90% One-hot + 10% Similarity Dist)
+        keep_ratio: OHEM 保留的困難樣本比例 (0.7 代表只回傳 Top 70% 困難的 loss)
+        """
+        super(SimilarityLDAMLoss, self).__init__()
+        m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
+        m_list = m_list * (max_m / np.max(m_list))
+        self.register_buffer('m_list', torch.FloatTensor(m_list))
+        self.s = s
+        self.alpha = alpha
+        self.keep_ratio = keep_ratio
+
+    def forward(self, x, target, classifier_weights):
+        # 1. LDAM Margin 計算
+        index = torch.zeros_like(x, dtype=torch.bool)
+        index.scatter_(1, target.data.view(-1, 1), True)
+        batch_m = self.m_list[target]
+        x_m = x - batch_m.view(-1, 1)
+        output = torch.where(index, x_m, x)
+
+        # 2. Similarity-based Soft Target 構建
+        # 取得分類器的權重 (in_features, num_classes)，計算各類別之間的 Cosine 相似度
+        norm_weights = F.normalize(classifier_weights.detach(), p=2, dim=0)
+        # [num_classes, num_classes]
+        sim_matrix = torch.mm(norm_weights.t(), norm_weights)
+        sim_matrix.fill_diagonal_(0.0)  # 排除自己的相似度
+        # [num_classes, num_classes]
+        sim_dist = F.softmax(sim_matrix * self.s, dim=1)
+
+        batch_sim_dist = sim_dist[target]  # 取出當前 batch labels 對應的相似度分佈
+
+        # 混合 One-hot 與 相似度分佈
+        one_hot = torch.zeros_like(x).scatter_(1, target.view(-1, 1), 1.0)
+        soft_targets = (1 - self.alpha) * one_hot + self.alpha * batch_sim_dist
+
+        # 3. 軟標籤 Cross Entropy 計算: CE = -sum(q * log(p))
+        log_probs = F.log_softmax(self.s * output, dim=1)
+        loss_unreduced = -(soft_targets * log_probs).sum(dim=1)
+
+        # 4. Hard Example Mining (OHEM)
+        if self.keep_ratio < 1.0:
+            num_hard = int(loss_unreduced.size(0) * self.keep_ratio)
+            # 只取 Loss 最高的 k 個樣本進行反向傳播
+            loss_unreduced, _ = loss_unreduced.topk(num_hard)
+
+        return loss_unreduced.mean()
+
 
 def get_attention_crops(images, activation_maps, threshold=0.6):
     """

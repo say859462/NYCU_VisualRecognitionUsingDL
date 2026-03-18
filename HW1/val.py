@@ -1,34 +1,37 @@
 import torch
 from tqdm import tqdm
 
-
-def validate_one_epoch(model, val_loader, criterion, device):
+def validate_one_epoch(model, val_loader, criterion, device, s=20.0):
+    """
+    s: 縮放係數 (scale factor)，必須與 SimilarityLDAMLoss 中的 s 保持一致，
+       確保 val_loss 與 train_loss 在同一個數量級。
+    """
     model.eval()
     running_loss = 0.0
     correct_preds = 0
     total_preds = 0
 
-    # Lists to store predictions and targets for analysis (e.g. Determine which classes are most confused)
     all_predictions = []
     all_targets = []
 
-    # tqdm progress bar
     pbar = tqdm(val_loader, desc="Validating", leave=False, colour="green")
     with torch.no_grad():
         for images, labels in pbar:
-
             images, labels = images.to(device), labels.to(device)
 
+            # 取得 Ensemble Logits (來自 NormedLinear，數值在 [-1, 1])
             outputs = model(images)
+            
+            # ⭐ 修正：補上 s=20.0 的縮放，還原 Logits 尺度以計算正確的 Cross Entropy Loss
+            scaled_outputs = outputs * s
 
-            loss = criterion(outputs, labels)
+            # 計算驗證 Loss
+            loss = criterion(scaled_outputs, labels)
 
-            # Loss is averaged over the batch, so we multiply by batch size to get total loss for the batch
-            # In case of the last batch which might be smaller, this will still work correctly
             running_loss += loss.item() * images.size(0)
 
-            # Take the class with the highest probability as the predicted label
-            _, preds = torch.max(outputs, 1)
+            # 計算準確率
+            _, preds = torch.max(scaled_outputs, 1)
 
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)
@@ -36,7 +39,6 @@ def validate_one_epoch(model, val_loader, criterion, device):
             all_predictions.extend(preds.cpu().numpy())
             all_targets.extend(labels.cpu().numpy())
 
-            # tqdm progress bar postfix update
             pbar.set_postfix({
                 'Loss': f"{running_loss / total_preds:.4f}",
                 'Acc': f"{(correct_preds / total_preds) * 100:.2f}%"
