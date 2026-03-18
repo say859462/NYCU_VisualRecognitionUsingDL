@@ -29,7 +29,7 @@ def main():
     parser.add_argument('--config_name', type=str, default='22th',
                         help='Name for the output directory')
 
-    parser.add_argument('--img_size', type=int, default=512,
+    parser.add_argument('--img_size', type=int, default=576,
                         help='Crop size for inference')
     args = parser.parse_args()
 
