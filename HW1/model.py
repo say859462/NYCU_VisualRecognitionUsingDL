@@ -151,11 +151,12 @@ class ImageClassificationModel(nn.Module):
 
         # --- Layer 3 Processing ---
         self.se_l3 = SEBlock(in_channels=1024, reduction=16)
-        self.rsa_l3 = ResidualSpatialAttention(
-            kernel_size=7)  # ⭐ 新增：為 Layer 3 裝備空間注意力
+        self.rsa_l3 = ResidualSpatialAttention(kernel_size=7)
+
+        # ⭐ 概念實踐 1：停止盲目壓縮，維持 1024 種中階紋理的豐富度
         self.reduce3 = nn.Sequential(
-            nn.Conv2d(1024, 512, kernel_size=1, bias=False),
-            nn.BatchNorm2d(512),
+            nn.Conv2d(1024, 1024, kernel_size=1, bias=False),  # 1024 -> 1024
+            nn.BatchNorm2d(1024),
             nn.ReLU(inplace=True)
         )
         self.gem3 = GeM(p=2.5)
@@ -190,12 +191,12 @@ class ImageClassificationModel(nn.Module):
 
         # 表頭 B (定位/全域)：處理 p3(512) + p4_gem(512) = 1024 -> 512
         self.embedding_gem = nn.Sequential(
-            nn.Linear(512 + 512, 512),
+            nn.Linear(1024 + 512, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
             nn.Dropout(p=0.5)
         )
-        self.classifier_gem = NormedLinear(512, num_classes)  # 修復維度 Bug
+        self.classifier_gem = NormedLinear(512, num_classes)
 
     def forward(self, x, return_attn=False):
         # Layer 3

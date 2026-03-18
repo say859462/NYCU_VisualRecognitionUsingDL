@@ -151,8 +151,7 @@ def main():
         num_classes=100, pretrained=True).to(device)
 
     for name, param in model.named_parameters():
-        if "backbone_l1_l3.0" in name or "backbone_l1_l3.1" in name:
-            # 僅凍結最基礎的 Stem. Only freeze the very first two layers (stem) to allow fine-tuning of deeper layers
+        if any(x in name for x in ["backbone_l1_l3.0", "backbone_l1_l3.1", "backbone_l1_l3.4", "backbone_l1_l3.5"]):
             param.requires_grad = False
         else:
             param.requires_grad = True
@@ -181,7 +180,7 @@ def main():
     drw_epoch = 15  # 在訓練的 60% 時啟動 DRW 和 Attention Crop
 
     # 3.3 Optimizer (Layer-wise LR)
-    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=2e-3)
+    optimizer = get_optimizer(model, lr_base=LR_BASE, weight_decay=5e-3)
 
     # 3.4 Scheduler
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
