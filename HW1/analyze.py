@@ -26,10 +26,10 @@ def main():
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to the model weights')
 
-    parser.add_argument('--config_name', type=str, default='22th',
+    parser.add_argument('--config_name', type=str, default='29th',
                         help='Name for the output directory')
 
-    parser.add_argument('--img_size', type=int, default=512,
+    parser.add_argument('--img_size', type=int, default=576,
                         help='Crop size for inference')
     args = parser.parse_args()
 
@@ -46,8 +46,8 @@ def main():
 
     # 推斷用的 Transform (可以根據需求調整 Resize 大小以榨取效能)
     val_transform = transforms.Compose([
-        transforms.Resize(int(args.img_size * 1.15)),  # 保持比例縮放
-        transforms.CenterCrop(args.img_size),
+        transforms.Resize(int(640)),  # 保持比例縮放
+        transforms.CenterCrop(576),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -65,6 +65,7 @@ def main():
 
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=False).to(device)
+
     if os.path.exists(args.model_path):
         model.load_state_dict(torch.load(args.model_path, map_location=device))
         print(f"Loaded weights from: {args.model_path}")
@@ -78,7 +79,7 @@ def main():
     model.eval()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
     all_preds, all_labels = [], []
-
+    DLAM_s = 20.0
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Validating ({args.tta})", colour="cyan")
         for images, labels in pbar:
@@ -86,21 +87,22 @@ def main():
 
             # --- TTA 核心邏輯 ---
             if args.tta == 'none':
-                outputs = model(images) * 20.0
+                outputs = model(images) * DLAM_s
                 probs = torch.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                outputs = model(images) * 20.0
-                out_flip = model(torch.flip(images, dims=[3])) * 20.0
+                outputs = model(images) * DLAM_s
+                out_flip = model(torch.flip(images, dims=[3])) * DLAM_s
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                outputs = model(images) * 20.0
-                out_flip = model(torch.flip(images, dims=[3])) * 20.0
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 20.0
+                outputs = model(images) * DLAM_s
+                out_flip = model(torch.flip(images, dims=[3])) * DLAM_s
+                out_rot90 = model(torch.rot90(
+                    images, k=1, dims=[2, 3])) * DLAM_s
                 out_rot270 = model(torch.rot90(
-                    images, k=3, dims=[2, 3])) * 20.0
+                    images, k=3, dims=[2, 3])) * DLAM_s
 
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1) +

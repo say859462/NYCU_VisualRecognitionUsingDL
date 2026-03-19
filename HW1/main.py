@@ -1,4 +1,4 @@
-from utils import SimilarityLDAMLoss, CenterLoss, plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, RandomDiscreteRotation
+from utils import SimilarityLDAMLoss, SupConLoss, plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, RandomDiscreteRotation
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -25,7 +25,7 @@ def main():
     # ==============================================================================
     # 1. Configuration & Arguments
     # ==============================================================================
-    parser = argparse.ArgumentParser(description="Image Classification Model Training")
+    parser = argparse.ArgumentParser(description="Image Classification Model Training (EXP 30: SupCon + 576D)")
     parser.add_argument('--config', type=str, default='./config.json', help='Path to the JSON configuration file')
     args = parser.parse_args()
 
@@ -52,10 +52,10 @@ def main():
     print(f"Device: {device}")
 
     # ==============================================================================
-    # 2. Data Preprocessing & Loaders (維持 Exp 14/22 最佳擴增方案)
+    # 2. Data Preprocessing & Loaders (EXP 30: 高解析度升級)
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.3, 1.0)),
+        transforms.RandomResizedCrop(576, scale=(0.3, 1.0)), # ⭐ 升級解析度
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(degrees=15),
         transforms.ColorJitter(brightness=0.1, contrast=0.1),
@@ -66,8 +66,8 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(600),
-        transforms.CenterCrop(512),
+        transforms.Resize(640),                              # ⭐ Resize 先拉高
+        transforms.CenterCrop(576),                          # ⭐ 再裁切出完美的 576 視野
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -92,7 +92,7 @@ def main():
     train_labels = train_dataset.targets
     class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
 
-    # ⭐ 全新混合 Loss：LDAM + Soft Label(alpha=0.1) + OHEM(Top 70%)
+    # 主損失函數：動態軟標籤 LDAM
     criterion = SimilarityLDAMLoss(
         cls_num_list=class_sample_count,
         max_m=0.45,
@@ -101,9 +101,9 @@ def main():
         keep_ratio=0.7 
     ).to(device)
 
-    # ⭐ 初始化 Center Loss (對齊 Embedding 維度 512)
-    center_loss_cbp = CenterLoss(num_classes=NUM_CLASSES, feat_dim=512).to(device)
-    center_loss_gem = CenterLoss(num_classes=NUM_CLASSES, feat_dim=512).to(device)
+    # ⭐ EXP 30：替換為 Supervised Contrastive Loss
+    supcon_loss_cbp = SupConLoss(temperature=0.1).to(device)
+    supcon_loss_gem = SupConLoss(temperature=0.1).to(device)
 
     allocated_params = set()
     backbone_l1_l3_params = [p for n, p in model.named_parameters() if "backbone_l1_l3" in n and p.requires_grad]
@@ -113,12 +113,11 @@ def main():
     allocated_params.update(id(p) for p in backbone_l4_params)
     head_params = [p for p in model.parameters() if p.requires_grad and id(p) not in allocated_params]
 
+    # ⭐ 移除 center_loss 相關參數，讓優化器專注於神經網路權重
     param_groups = [
         {'params': backbone_l1_l3_params, 'lr': LR_BASE * 0.1},
         {'params': backbone_l4_params, 'lr': LR_BASE * 0.5},
-        {'params': head_params, 'lr': LR_BASE * 4.0},
-        {'params': center_loss_cbp.parameters(), 'lr': LR_BASE * 5.0}, # CenterLoss 需要較大 LR 更新特徵中心
-        {'params': center_loss_gem.parameters(), 'lr': LR_BASE * 5.0}
+        {'params': head_params, 'lr': LR_BASE * 4.0}
     ]
 
     optimizer = optim.AdamW(param_groups, weight_decay=1e-3)
@@ -153,10 +152,7 @@ def main():
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         history = checkpoint['history']
         
-        # 載入 CenterLoss 權重
-        if 'center_loss_cbp' in checkpoint: center_loss_cbp.load_state_dict(checkpoint['center_loss_cbp'])
-        if 'center_loss_gem' in checkpoint: center_loss_gem.load_state_dict(checkpoint['center_loss_gem'])
-
+        # 移除了 Center Loss 載入邏輯
         if 'scaler_state_dict' in checkpoint: scaler.load_state_dict(checkpoint['scaler_state_dict'])
         if 'scheduler_state_dict' in checkpoint: scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
@@ -178,16 +174,15 @@ def main():
             if enable_crop and epoch == crop_epoch:
                 print(f" [Attention Crop] activated!")
 
-            # 傳入 CenterLoss 給 train_one_epoch
+            # ⭐ 傳入 SupCon Loss
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, device, scaler,
-                center_loss_cbp=center_loss_cbp, 
-                center_loss_gem=center_loss_gem,
+                supcon_loss_cbp=supcon_loss_cbp, 
+                supcon_loss_gem=supcon_loss_gem,
                 max_grad_norm=2.0, 
                 use_crop=enable_crop
             )
             
-            # Val 中 criterion 僅計算基本 Loss (無需 CenterLoss 參與預測)
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(model, val_loader, torch.nn.CrossEntropyLoss(), device)
 
             scheduler.step()
@@ -219,8 +214,6 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'scaler_state_dict': scaler.state_dict(),
-                'center_loss_cbp': center_loss_cbp.state_dict(),
-                'center_loss_gem': center_loss_gem.state_dict(),
                 'best_val_acc': best_val_acc,
                 'best_val_loss': best_val_loss,
                 'history': history,

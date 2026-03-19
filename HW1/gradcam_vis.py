@@ -33,7 +33,7 @@ def main():
                         default=100, help='Number of classes')
 
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/27th', help='Directory to save heatmaps')
+                        default='./Plot/GradCAM_Outputs/30th', help='Directory to save heatmaps')
 
     args = parser.parse_args()
 
@@ -59,8 +59,8 @@ def main():
 
     # 影像前處理定義
     preprocess_geo = transforms.Compose([
-        transforms.Resize(600),
-        transforms.CenterCrop(512)
+        transforms.Resize(640),
+        transforms.CenterCrop(576)
     ])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),
@@ -121,7 +121,7 @@ def main():
                 # ⭐ 執行 Layer 4 RSA 內部權重視覺化 (放棄容易受雜訊干擾的 Grad-CAM)
                 # 將 14x14 的注意力圖插值放大到 512x512
                 attn_map = F.interpolate(spatial_attn, size=(
-                    512, 512), mode='bilinear', align_corners=False)
+                    576, 576), mode='bilinear', align_corners=False)
                 attn_map = attn_map.squeeze().cpu().numpy()
 
                 # 歸一化權重到 0~1 之間以便繪製熱力圖

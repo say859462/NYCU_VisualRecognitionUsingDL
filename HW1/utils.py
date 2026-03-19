@@ -9,11 +9,63 @@ from torchvision import transforms
 import random
 import torchvision.transforms.functional as TF
 
-# --- 新增：Center Loss (特徵中心損失) ---
+# 請將原本的 CenterLoss 替換或新增這段 SupConLoss
+class SupConLoss(nn.Module):
+    def __init__(self, temperature=0.1):
+        super(SupConLoss, self).__init__()
+        self.temperature = temperature
 
+    def forward(self, features, labels):
+        """
+        features: [batch_size, feat_dim] (尚未標準化的 Embedding)
+        labels: [batch_size]
+        """
+        device = features.device
+        batch_size = features.shape[0]
+
+        # 1. 投射到單位超球面 (L2 Normalize)
+        features = F.normalize(features.float(), p=2, dim=1)
+
+        # 2. 計算所有樣本兩兩之間的 Cosine 相似度矩陣，並除以溫度係數 (Temperature)
+        sim_matrix = torch.div(torch.matmul(features, features.T), self.temperature)
+
+        # 為了數值穩定性，減去最大值
+        logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
+        logits = sim_matrix - logits_max.detach()
+
+        # 3. 建立 Mask 找出同類別的 Positive Pairs
+        labels = labels.contiguous().view(-1, 1)
+        mask = torch.eq(labels, labels.T).float().to(device)
+
+        # 排除自己與自己的對比 (對角線設為 0)
+        logits_mask = torch.scatter(
+            torch.ones_like(mask), 1, torch.arange(batch_size).view(-1, 1).to(device), 0
+        )
+        mask = mask * logits_mask
+
+        # 4. 計算 Log-Softmax 分佈
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-12)
+
+        # 5. 計算 Mean Log-Likelihood (僅針對 Positive Pairs)
+        mask_sum = mask.sum(1)
+        
+        # ⚠️ 關鍵防呆：如果這個 Batch 中某個類別只有 1 張圖 (沒有 Positive Pair)
+        # 則該樣本的 mask_sum 為 0。我們將其濾除不計算 SupCon Loss，交給原本的 CE Loss 處理。
+        valid_samples = mask_sum > 0
+        if not valid_samples.any():
+            # 若整個 Batch 完全沒有重複類別，回傳 0 梯度
+            return (features * 0).sum()
+
+        mean_log_prob_pos = (mask[valid_samples] * log_prob[valid_samples]).sum(1) / mask_sum[valid_samples]
+
+        # 最終 Loss (越小代表同類越近、異類越遠)
+        loss = -mean_log_prob_pos.mean()
+        return loss
+    
 
 class CenterLoss(nn.Module):
-    def __init__(self, num_classes=100, feat_dim=2048):
+    def __init__(self, num_classes=100, feat_dim=512):
         super(CenterLoss, self).__init__()
         self.num_classes = num_classes
         self.feat_dim = feat_dim
@@ -21,15 +73,18 @@ class CenterLoss(nn.Module):
             torch.randn(self.num_classes, self.feat_dim))
 
     def forward(self, x, labels):
-        """
-        x: feature matrix with shape (batch_size, feat_dim).
-        labels: ground truth labels with shape (batch_size).
-        """
+        # ⭐ 核心修正：將特徵與特徵中心投射到「單位超球面」
+        # 這確保了距離最大不超過 4.0，徹底解決 Loss 飆破 100 與梯度坍塌的問題！
+        x = F.normalize(x.float(), p=2, dim=1)
+        centers = F.normalize(self.centers.float(), p=2, dim=1)
+
         batch_size = x.size(0)
+
         distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
-            torch.pow(self.centers, 2).sum(dim=1, keepdim=True).expand(
+            torch.pow(centers, 2).sum(dim=1, keepdim=True).expand(
                 self.num_classes, batch_size).t()
-        distmat.addmm_(x, self.centers.t(), beta=1, alpha=-2)
+
+        distmat.addmm_(x, centers.t(), beta=1, alpha=-2)
 
         classes = torch.arange(self.num_classes).long().to(x.device)
         labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
@@ -39,15 +94,11 @@ class CenterLoss(nn.Module):
         loss = dist.clamp(min=1e-12, max=1e+12).sum() / batch_size
         return loss
 
-# --- 升級：Similarity-based LDAM Loss + OHEM ---
+# --- 修正 2：SimilarityLDAMLoss 的對角線屏蔽 ---
 
 
 class SimilarityLDAMLoss(nn.Module):
     def __init__(self, cls_num_list, max_m=0.45, s=20.0, alpha=0.1, keep_ratio=0.7):
-        """
-        alpha: Soft label 的權重 (0.1 代表 90% One-hot + 10% Similarity Dist)
-        keep_ratio: OHEM 保留的困難樣本比例 (0.7 代表只回傳 Top 70% 困難的 loss)
-        """
         super(SimilarityLDAMLoss, self).__init__()
         m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
         m_list = m_list * (max_m / np.max(m_list))
@@ -65,28 +116,25 @@ class SimilarityLDAMLoss(nn.Module):
         output = torch.where(index, x_m, x)
 
         # 2. Similarity-based Soft Target 構建
-        # 取得分類器的權重 (in_features, num_classes)，計算各類別之間的 Cosine 相似度
         norm_weights = F.normalize(classifier_weights.detach(), p=2, dim=0)
-        # [num_classes, num_classes]
         sim_matrix = torch.mm(norm_weights.t(), norm_weights)
-        sim_matrix.fill_diagonal_(0.0)  # 排除自己的相似度
-        # [num_classes, num_classes]
+
+        # ⭐ 核心修正：將對角線(自己)設為 -1e9，確保 Softmax 後相似度 100% 分配給"其他"容易混淆的類別
+        sim_matrix.fill_diagonal_(-1e9)
         sim_dist = F.softmax(sim_matrix * self.s, dim=1)
 
-        batch_sim_dist = sim_dist[target]  # 取出當前 batch labels 對應的相似度分佈
+        batch_sim_dist = sim_dist[target]
 
-        # 混合 One-hot 與 相似度分佈
         one_hot = torch.zeros_like(x).scatter_(1, target.view(-1, 1), 1.0)
         soft_targets = (1 - self.alpha) * one_hot + self.alpha * batch_sim_dist
 
-        # 3. 軟標籤 Cross Entropy 計算: CE = -sum(q * log(p))
+        # 3. 軟標籤 Cross Entropy
         log_probs = F.log_softmax(self.s * output, dim=1)
         loss_unreduced = -(soft_targets * log_probs).sum(dim=1)
 
         # 4. Hard Example Mining (OHEM)
         if self.keep_ratio < 1.0:
             num_hard = int(loss_unreduced.size(0) * self.keep_ratio)
-            # 只取 Loss 最高的 k 個樣本進行反向傳播
             loss_unreduced, _ = loss_unreduced.topk(num_hard)
 
         return loss_unreduced.mean()

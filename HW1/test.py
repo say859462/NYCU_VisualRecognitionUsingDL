@@ -19,7 +19,7 @@ def main():
                         default='./config.json', help='Path to config')
     parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
                         help='Path to your best model weights')
-    parser.add_argument('--img_size', type=int, default=512,
+    parser.add_argument('--img_size', type=int, default=576,
                         help='Optimized crop size')
     # 新增 TTA 模式參數
     parser.add_argument('--tta', type=str, default='none',
@@ -42,8 +42,8 @@ def main():
 
     # 推論前處理設定
     test_transform = transforms.Compose([
-        transforms.Resize(int(args.img_size * 1.15)),
-        transforms.CenterCrop(args.img_size),
+        transforms.Resize(int(640)),
+        transforms.CenterCrop(576),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
