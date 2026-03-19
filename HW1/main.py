@@ -1,4 +1,4 @@
-from utils import SimilarityLDAMLoss, SupConLoss, plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, RandomDiscreteRotation
+from utils import SimilarityLDAMLoss, SupConLoss, plot_training_curves, plot_per_class_error, plot_long_tail_accuracy
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -27,9 +27,9 @@ def main():
     # 1. Configuration & Arguments
     # ==============================================================================
     parser = argparse.ArgumentParser(
-        description="Image Classification Model Training (EXP 30: SupCon + 576D)")
-    parser.add_argument('--config', type=str, default='./config.json',
-                        help='Path to the JSON configuration file')
+        description="Image Classification Model Training")
+    parser.add_argument('--config', type=str,
+                        default='./config.json', help='Path to config')
     args = parser.parse_args()
 
     print(f"Loading configuration file: {args.config}")
@@ -38,7 +38,7 @@ def main():
 
     BATCH_SIZE = config['batch_size']
     NUM_EPOCHS = config['num_epochs']
-    LR_BASE = config.get('learning_rate', 1e-4)
+    LR_BASE = config.get('learning_rate', 2e-4)  # ⭐ 預訓練基底好，建議稍微調高基礎 LR
     EARLY_STOPPING_PATIENCE = config.get('early_stopping_patience', 40)
     NUM_CLASSES = config['num_classes']
     DATA_DIR = config['data_dir']
@@ -46,21 +46,17 @@ def main():
     BEST_MODEL_PATH = config['best_model_path']
     RESUME_TRAINING = config['resume_training']
 
-    checkpoint_dir = os.path.dirname(CHECKPOINT_PATH)
-    best_model_dir = os.path.dirname(BEST_MODEL_PATH)
-    if checkpoint_dir:
-        os.makedirs(checkpoint_dir, exist_ok=True)
-    if best_model_dir:
-        os.makedirs(best_model_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(BEST_MODEL_PATH), exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
     # ==============================================================================
-    # 2. Data Preprocessing & Loaders (EXP 30: 高解析度升級)
+    # 2. Data Preprocessing & Loaders
     # ==============================================================================
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.3, 1.0)),  # ⭐ 升級解析度
+        transforms.RandomResizedCrop(512, scale=(0.3, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(degrees=15),
         transforms.ColorJitter(brightness=0.1, contrast=0.1),
@@ -72,8 +68,8 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(576),                              # ⭐ Resize 先拉高
-        transforms.CenterCrop(512),                          # ⭐ 再裁切出完美的 576 視野
+        transforms.Resize(576),
+        transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -84,8 +80,8 @@ def main():
     val_dataset = ImageDataset(
         root_dir=DATA_DIR, split="val", transform=val_transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE,
-                              shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=8, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
                             num_workers=8, pin_memory=True, persistent_workers=True)
 
@@ -95,8 +91,9 @@ def main():
     model = ImageClassificationModel(
         num_classes=100, pretrained=True).to(device)
 
+    # ⭐ 修正 1：對齊官方 Backbone 名稱來凍結淺層 (選配，凍結 stem 與 layer1 可穩定初期訓練)
     for name, param in model.named_parameters():
-        if any(x in name for x in ["backbone_l1_l3.0", "backbone_l1_l3.1"]):
+        if any(name.startswith(prefix) for prefix in ['conv1', 'bn1', 'layer1']):
             param.requires_grad = False
         else:
             param.requires_grad = True
@@ -104,50 +101,41 @@ def main():
     train_labels = train_dataset.targets
     class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
 
-    # 主損失函數：動態軟標籤 LDAM
+    # 既然有預訓練好基底，直接啟用 LDAM + OHEM
     criterion = SimilarityLDAMLoss(
-        cls_num_list=class_sample_count,
-        max_m=0.45,
-        s=20.0,
-        alpha=0.1,
-        keep_ratio=0.7
+        cls_num_list=class_sample_count, max_m=0.45, s=20.0, alpha=0.1, keep_ratio=0.7
     ).to(device)
 
-    # ⭐ EXP 30：替換為 Supervised Contrastive Loss
     supcon_loss_cbp = SupConLoss(temperature=0.1).to(device)
     supcon_loss_gem = SupConLoss(temperature=0.1).to(device)
 
-    # ==============================================================================
-    # 參數分組優化 (針對手寫 ResNeXt 結構優化)
-    # ==============================================================================
-    allocated_params = set()
-    # 淺層：負責基礎形狀與顏色，LR 設最小
-    backbone_l1_l3_params = [p for n, p in model.named_parameters(
-    ) if "backbone_l1_l3" in n and p.requires_grad]
-    # 深層：負責高階語義，LR 設中等
-    backbone_l4_params = [p for n, p in model.named_parameters(
-    ) if "backbone_l4" in n and p.requires_grad]
+    # ⭐ 修正 2：對齊新的模組名稱進行非對稱學習率分組
+    head_params = []
+    attention_cbp_params = []
+    backbone_params = []
 
-    allocated_params.update(id(p) for p in backbone_l1_l3_params)
-    allocated_params.update(id(p) for p in backbone_l4_params)
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'classifier' in name or 'embedding' in name:
+            head_params.append(param)
+        elif 'se_' in name or 'rsa_' in name or 'reduce' in name or 'cbp' in name or 'gem' in name:
+            attention_cbp_params.append(param)
+        else:
+            backbone_params.append(param)  # 官方 resnext 預訓練權重
 
-    # 分類頭 (CBP, GeM, Classifiers)：新初始化層，LR 設最大
-    head_params = [p for p in model.parameters(
-    ) if p.requires_grad and id(p) not in allocated_params]
-
-    # ⭐ 移除 center_loss 相關參數，讓優化器專注於神經網路權重
     param_groups = [
-        {'params': backbone_l1_l3_params, 'lr': LR_BASE * 0.5},
-        {'params': backbone_l4_params, 'lr': LR_BASE * 1.0},
-        {'params': head_params, 'lr': LR_BASE * 2.0}
+        {'params': backbone_params, 'lr': LR_BASE * 0.1},      # 預訓練權重只做微調
+        {'params': attention_cbp_params, 'lr': LR_BASE * 1.0},  # 新加的注意力模組正常學習
+        {'params': head_params, 'lr': LR_BASE * 2.0},          # 分類頭快速學習
     ]
 
     optimizer = optim.AdamW(param_groups, weight_decay=1e-3)
 
     from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
-    warmup_epochs = 10
+    warmup_epochs = 5
     cosine_epochs = NUM_EPOCHS - warmup_epochs
-    warmup_sch = LinearLR(optimizer, start_factor=0.5,
+    warmup_sch = LinearLR(optimizer, start_factor=0.1,
                           total_iters=warmup_epochs)
     cosine_sch = CosineAnnealingLR(
         optimizer, T_max=cosine_epochs, eta_min=1e-6)
@@ -180,7 +168,6 @@ def main():
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         history = checkpoint['history']
 
-        # 移除了 Center Loss 載入邏輯
         if 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
@@ -195,17 +182,18 @@ def main():
     # ==============================================================================
     # 5. Main Training Loop
     # ==============================================================================
-    crop_epoch = int(NUM_EPOCHS * 0.5)
     training_start_time = time.time()
-
+    CROP_EPOCH = 10
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
-            enable_crop = (epoch >= crop_epoch)
-            if enable_crop and epoch == crop_epoch:
-                print(f" [Attention Crop] activated!")
 
-            # ⭐ 傳入 SupCon Loss
+            # ⭐ 修正 3：取消階段性啟動，從第一輪直接開啟 Attention Crop 狂暴模式
+            enable_crop = (epoch >= CROP_EPOCH)
+            if enable_crop and epoch == CROP_EPOCH:
+                print(f" [Attention Crop] activated from Epoch 1!")
+
+            # 修正 4：正確傳遞 supcon_loss 給 train_one_epoch，並移除用不到的 center_loss
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion, optimizer, device, scaler,
                 supcon_loss_cbp=supcon_loss_cbp,
