@@ -7,7 +7,6 @@ from torchvision import models
 # 1. FGVC 增強組件 (完全保留你的獨家設計，並降噪優化)
 # ==============================================================================
 
-
 class SEBlock(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super(SEBlock, self).__init__()
@@ -24,7 +23,6 @@ class SEBlock(nn.Module):
         y = self.fc(self.avg_pool(x).view(b, c)).view(b, c, 1, 1)
         return x * y
 
-
 class ResidualSpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
         super(ResidualSpatialAttention, self).__init__()
@@ -37,7 +35,6 @@ class ResidualSpatialAttention(nn.Module):
         max_out, _ = torch.max(x, dim=1, keepdim=True)
         attn = self.sigmoid(self.conv1(torch.cat([avg_out, max_out], dim=1)))
         return x * (1 + attn)
-
 
 class CompactBilinearPooling(nn.Module):
     # 輸出降維至 1024，大幅減少 FFT 帶來的計算雜訊與震盪
@@ -64,7 +61,6 @@ class CompactBilinearPooling(nn.Module):
         cbp = torch.sign(cbp) * torch.sqrt(torch.abs(cbp) + 1e-5)
         return F.normalize(cbp, p=2, dim=1).to(x.dtype)
 
-
 class NormedLinear(nn.Module):
     def __init__(self, in_features, out_features):
         super(NormedLinear, self).__init__()
@@ -73,7 +69,6 @@ class NormedLinear(nn.Module):
 
     def forward(self, x):
         return torch.mm(F.normalize(x, p=2, dim=1), F.normalize(self.weight, p=2, dim=0))
-
 
 class GeM(nn.Module):
     def __init__(self, p=3.0, eps=1e-6):
@@ -88,7 +83,6 @@ class GeM(nn.Module):
 # 2. 完整模型 (官方 torchvision 骨幹 + 自訂表頭嫁接)
 # ==============================================================================
 
-
 class ImageClassificationModel(nn.Module):
     def __init__(self, num_classes: int = 100, pretrained: bool = True):
         super(ImageClassificationModel, self).__init__()
@@ -96,8 +90,9 @@ class ImageClassificationModel(nn.Module):
         # ---------------------------------------------------------
         # A. 直接提取 torchvision 官方 ResNeXt-101 32x8d
         # ---------------------------------------------------------
-        weights = models.ResNeXt50_32X4D_Weights.DEFAULT if pretrained else None
-        backbone = models.resnext50_32x4d(weights=weights)
+        # ⭐ 核心修改點：將 50_32x4d 全面升級為 101_32x8d
+        weights = models.ResNeXt101_32X8D_Weights.DEFAULT if pretrained else None
+        backbone = models.resnext101_32x8d(weights=weights)
 
         # 將骨幹拆解並賦值給我們的模組 (丟棄原本的 avgpool 和 fc)
         self.conv1 = backbone.conv1
@@ -116,12 +111,12 @@ class ImageClassificationModel(nn.Module):
         self.se_l3 = SEBlock(1024)
         self.reduce3 = nn.Sequential(
             nn.Conv2d(1024, 512, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(True))
-        self.gem3 = GeM(p=2.5)
+        self.gem3 = GeM(p=3.0)
 
         self.rsa_l4 = ResidualSpatialAttention()
         self.reduce4 = nn.Sequential(
             nn.Conv2d(2048, 512, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(True))
-        self.gem4 = GeM(p=2.5)
+        self.gem4 = GeM(p=3.0)
 
         self.cbp = CompactBilinearPooling(512, 2048)
 
@@ -179,6 +174,5 @@ class ImageClassificationModel(nn.Module):
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
-        print(
-            f"📊 Final Model Status: {total/1e6:.2f}M params (Threshold: 100M)")
+        print(f"📊 Final Model Status: {total/1e6:.2f}M params (Threshold: 100M)")
         return total < 100_000_000
