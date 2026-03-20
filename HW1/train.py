@@ -14,7 +14,7 @@ def train_one_epoch(model, train_loader, criterion_ce, criterion_ldam, cb_weight
     enable_local = epoch > 15
 
     pbar = tqdm(
-        train_loader, desc=f"Training Epoch {epoch} (Local Path: {enable_local})", leave=False)
+        train_loader, desc=f"Training Epoch {epoch} )", leave=False)
     for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()

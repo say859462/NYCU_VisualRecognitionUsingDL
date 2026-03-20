@@ -46,7 +46,7 @@ class ImageClassificationModel(nn.Module):
             nn.Linear(3072, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(0.4)
+            nn.Dropout(0.5)
         )
 
         # ⭐ 只需一個分類頭，Global 和 Local 共享權重
