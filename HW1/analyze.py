@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
-
+import torch.functional as F
 from dataset import ImageDataset
 from model import ImageClassificationModel
 from utils import (
@@ -79,40 +79,41 @@ def main():
     model.eval()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
     all_preds, all_labels = [], []
+    DLAM_s = 20.0
     with torch.no_grad():
         pbar = tqdm(val_loader, desc=f"Validating ({args.tta})", colour="cyan")
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            # --- TTA 核心邏輯 (純 CrossEntropy 版本) ---
-            # --- TTA 核心邏輯 (LDAM Stage 2 版本，必須縮放) ---
+            # --- TTA 核心邏輯 ---
             if args.tta == 'none':
-                outputs = model(images) * 20.0  # ⭐ 補上 * 20.0
-                probs = torch.softmax(outputs, dim=1)
+                outputs = model(images)
+                avg_probs = F.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                outputs = model(images) * 20.0
-                out_flip = model(torch.flip(images, dims=[3])) * 20.0
-                probs = (torch.softmax(outputs, dim=1) +
-                         torch.softmax(out_flip, dim=1)) / 2.0
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                avg_probs = (F.softmax(out_orig, dim=1) +
+                             F.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                outputs = model(images) * 20.0
-                out_flip = model(torch.flip(images, dims=[3])) * 20.0
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 20.0
-                out_rot270 = model(torch.rot90(
-                    images, k=3, dims=[2, 3])) * 20.0
+                out_orig = model(images)
+                out_flip = model(torch.flip(images, dims=[3]))
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
+                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
 
-                probs = (torch.softmax(outputs, dim=1) +
-                         torch.softmax(out_flip, dim=1) +
-                         torch.softmax(out_rot90, dim=1) +
-                         torch.softmax(out_rot270, dim=1)) / 4.0
+                p0 = F.softmax(out_orig, dim=1)
+                p1 = F.softmax(out_flip, dim=1)
+                p2 = F.softmax(out_rot90, dim=1)
+                p3 = F.softmax(out_rot270, dim=1)
+
+                avg_probs = (p0 + p1 + p2 + p3) / 4.0
 
             # ⭐ 注意：因為 outputs 已經乘上 20.0 了，這裡計算 Loss 就是正確的尺度
             loss = criterion(outputs, labels)
             running_loss += loss.item() * images.size(0)
 
-            _, preds = torch.max(probs, 1)
+            _, preds = torch.max(avg_probs, 1)
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)
 

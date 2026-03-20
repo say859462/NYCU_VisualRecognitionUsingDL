@@ -70,10 +70,10 @@ def main():
             rgb_img = np.float32(cropped_img) / 255.0
 
             with torch.no_grad():
+                # ⭐ 修正：現在只會回傳 logits
                 outputs = model(input_tensor)
-                # ⭐ 補回 * 20.0，否則算出來的 Confidence 會全部趨近於 1%
                 probabilities = torch.nn.functional.softmax(
-                    outputs * 20.0, dim=1)[0]
+                    outputs, dim=1)[0]
                 pred_class = probabilities.argmax().item()
                 pred_score = probabilities[pred_class].item()
 
