@@ -71,8 +71,9 @@ def main():
 
             with torch.no_grad():
                 outputs = model(input_tensor)
-                # ⭐ 直接使用 outputs，不需要乘上 s_vis = 20.0
-                probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
+                # ⭐ 補回 * 20.0，否則算出來的 Confidence 會全部趨近於 1%
+                probabilities = torch.nn.functional.softmax(
+                    outputs * 20.0, dim=1)[0]
                 pred_class = probabilities.argmax().item()
                 pred_score = probabilities[pred_class].item()
 

@@ -85,27 +85,30 @@ def main():
             images, labels = images.to(device), labels.to(device)
 
             # --- TTA 核心邏輯 (純 CrossEntropy 版本) ---
+            # --- TTA 核心邏輯 (LDAM Stage 2 版本，必須縮放) ---
             if args.tta == 'none':
-                outputs = model(images)
+                outputs = model(images) * 20.0  # ⭐ 補上 * 20.0
                 probs = torch.softmax(outputs, dim=1)
 
             elif args.tta == 'flip':
-                outputs = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
+                outputs = model(images) * 20.0
+                out_flip = model(torch.flip(images, dims=[3])) * 20.0
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                outputs = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
-                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
+                outputs = model(images) * 20.0
+                out_flip = model(torch.flip(images, dims=[3])) * 20.0
+                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3])) * 20.0
+                out_rot270 = model(torch.rot90(
+                    images, k=3, dims=[2, 3])) * 20.0
 
                 probs = (torch.softmax(outputs, dim=1) +
                          torch.softmax(out_flip, dim=1) +
                          torch.softmax(out_rot90, dim=1) +
                          torch.softmax(out_rot270, dim=1)) / 4.0
 
+            # ⭐ 注意：因為 outputs 已經乘上 20.0 了，這裡計算 Loss 就是正確的尺度
             loss = criterion(outputs, labels)
             running_loss += loss.item() * images.size(0)
 
