@@ -9,96 +9,46 @@ from torchvision import transforms
 import random
 import torchvision.transforms.functional as TF
 
-# 請將原本的 CenterLoss 替換或新增這段 SupConLoss
-class SupConLoss(nn.Module):
-    def __init__(self, temperature=0.1):
-        super(SupConLoss, self).__init__()
-        self.temperature = temperature
+# ⭐ 1. 殘差空間注意力 (RSA)
 
-    def forward(self, features, labels):
-        """
-        features: [batch_size, feat_dim] (尚未標準化的 Embedding)
-        labels: [batch_size]
-        """
-        device = features.device
-        batch_size = features.shape[0]
 
-        # 1. 投射到單位超球面 (L2 Normalize)
-        features = F.normalize(features.float(), p=2, dim=1)
+class ResidualSpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
 
-        # 2. 計算所有樣本兩兩之間的 Cosine 相似度矩陣，並除以溫度係數 (Temperature)
-        sim_matrix = torch.div(torch.matmul(features, features.T), self.temperature)
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        attn = torch.cat([avg_out, max_out], dim=1)
+        attn = self.conv(attn)
+        attn = self.sigmoid(attn)
+        return x * (1 + attn)
 
-        # 為了數值穩定性，減去最大值
-        logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
-        logits = sim_matrix - logits_max.detach()
+# ⭐ 2. Class-Balanced Weights
 
-        # 3. 建立 Mask 找出同類別的 Positive Pairs
-        labels = labels.contiguous().view(-1, 1)
-        mask = torch.eq(labels, labels.T).float().to(device)
 
-        # 排除自己與自己的對比 (對角線設為 0)
-        logits_mask = torch.scatter(
-            torch.ones_like(mask), 1, torch.arange(batch_size).view(-1, 1).to(device), 0
-        )
-        mask = mask * logits_mask
+def get_cb_weights(labels_list, num_classes=100, beta=0.999):
+    class_counts = np.bincount(labels_list, minlength=num_classes)
+    cb_weights = []
+    for count in class_counts:
+        if count == 0:
+            cb_weights.append(0.0)
+        else:
+            weight = (1.0 - beta) / (1.0 - np.power(beta, count))
+            cb_weights.append(weight)
 
-        # 4. 計算 Log-Softmax 分佈
-        exp_logits = torch.exp(logits) * logits_mask
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-12)
+    cb_weights = np.array(cb_weights)
+    cb_weights = cb_weights / np.sum(cb_weights) * num_classes
+    return torch.FloatTensor(cb_weights)
 
-        # 5. 計算 Mean Log-Likelihood (僅針對 Positive Pairs)
-        mask_sum = mask.sum(1)
-        
-        # ⚠️ 關鍵防呆：如果這個 Batch 中某個類別只有 1 張圖 (沒有 Positive Pair)
-        # 則該樣本的 mask_sum 為 0。我們將其濾除不計算 SupCon Loss，交給原本的 CE Loss 處理。
-        valid_samples = mask_sum > 0
-        if not valid_samples.any():
-            # 若整個 Batch 完全沒有重複類別，回傳 0 梯度
-            return (features * 0).sum()
-
-        mean_log_prob_pos = (mask[valid_samples] * log_prob[valid_samples]).sum(1) / mask_sum[valid_samples]
-
-        # 最終 Loss (越小代表同類越近、異類越遠)
-        loss = -mean_log_prob_pos.mean()
-        return loss
-    
-
-class CenterLoss(nn.Module):
-    def __init__(self, num_classes=100, feat_dim=512):
-        super(CenterLoss, self).__init__()
-        self.num_classes = num_classes
-        self.feat_dim = feat_dim
-        self.centers = nn.Parameter(
-            torch.randn(self.num_classes, self.feat_dim))
-
-    def forward(self, x, labels):
-        # ⭐ 核心修正：將特徵與特徵中心投射到「單位超球面」
-        # 這確保了距離最大不超過 4.0，徹底解決 Loss 飆破 100 與梯度坍塌的問題！
-        x = F.normalize(x.float(), p=2, dim=1)
-        centers = F.normalize(self.centers.float(), p=2, dim=1)
-
-        batch_size = x.size(0)
-
-        distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
-            torch.pow(centers, 2).sum(dim=1, keepdim=True).expand(
-                self.num_classes, batch_size).t()
-
-        distmat.addmm_(x, centers.t(), beta=1, alpha=-2)
-
-        classes = torch.arange(self.num_classes).long().to(x.device)
-        labels = labels.unsqueeze(1).expand(batch_size, self.num_classes)
-        mask = labels.eq(classes.expand(batch_size, self.num_classes))
-
-        dist = distmat * mask.float()
-        loss = dist.clamp(min=1e-12, max=1e+12).sum() / batch_size
-        return loss
-
-# --- 修正 2：SimilarityLDAMLoss 的對角線屏蔽 ---
+# ⭐ 3. 升級版 SimilarityLDAMLoss (整合 CB Weight 乘積)
 
 
 class SimilarityLDAMLoss(nn.Module):
-    def __init__(self, cls_num_list, max_m=0.45, s=20.0, alpha=0.1, keep_ratio=0.7):
+    def __init__(self, cls_num_list, max_m=0.35, s=15.0, alpha=0.1, keep_ratio=0.7):
         super(SimilarityLDAMLoss, self).__init__()
         m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
         m_list = m_list * (max_m / np.max(m_list))
@@ -107,32 +57,29 @@ class SimilarityLDAMLoss(nn.Module):
         self.alpha = alpha
         self.keep_ratio = keep_ratio
 
-    def forward(self, x, target, classifier_weights):
-        # 1. LDAM Margin 計算
+    def forward(self, x, target, classifier_weights, cb_weights=None):
         index = torch.zeros_like(x, dtype=torch.bool)
         index.scatter_(1, target.data.view(-1, 1), True)
         batch_m = self.m_list[target]
         x_m = x - batch_m.view(-1, 1)
         output = torch.where(index, x_m, x)
 
-        # 2. Similarity-based Soft Target 構建
         norm_weights = F.normalize(classifier_weights.detach(), p=2, dim=0)
         sim_matrix = torch.mm(norm_weights.t(), norm_weights)
-
-        # ⭐ 核心修正：將對角線(自己)設為 -1e9，確保 Softmax 後相似度 100% 分配給"其他"容易混淆的類別
         sim_matrix.fill_diagonal_(-1e9)
         sim_dist = F.softmax(sim_matrix * self.s, dim=1)
-
         batch_sim_dist = sim_dist[target]
 
         one_hot = torch.zeros_like(x).scatter_(1, target.view(-1, 1), 1.0)
         soft_targets = (1 - self.alpha) * one_hot + self.alpha * batch_sim_dist
 
-        # 3. 軟標籤 Cross Entropy
         log_probs = F.log_softmax(self.s * output, dim=1)
         loss_unreduced = -(soft_targets * log_probs).sum(dim=1)
 
-        # 4. Hard Example Mining (OHEM)
+        # 套用長尾權重
+        if cb_weights is not None:
+            loss_unreduced = loss_unreduced * cb_weights[target]
+
         if self.keep_ratio < 1.0:
             num_hard = int(loss_unreduced.size(0) * self.keep_ratio)
             loss_unreduced, _ = loss_unreduced.topk(num_hard)

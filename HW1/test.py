@@ -72,27 +72,28 @@ def main():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
 
-            # --- TTA 整合邏輯 (純粹 CrossEntropy 版本，無任何縮放) ---
+            # ⭐ 修正：解包 Tuple，並各自乘上 s=15.0
             if args.tta == 'none':
-                outputs = model(images)
-                avg_probs = F.softmax(outputs, dim=1)
+                out_orig, _ = model(images)
+                avg_probs = F.softmax(out_orig * 15.0, dim=1)
 
             elif args.tta == 'flip':
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                avg_probs = (F.softmax(out_orig, dim=1) +
-                             F.softmax(out_flip, dim=1)) / 2.0
+                out_orig, _ = model(images)
+                out_flip, _ = model(torch.flip(images, dims=[3]))
+
+                avg_probs = (F.softmax(out_orig * 15.0, dim=1) +
+                             F.softmax(out_flip * 15.0, dim=1)) / 2.0
 
             elif args.tta == 'rotational':
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
-                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
+                out_orig, _ = model(images)
+                out_flip, _ = model(torch.flip(images, dims=[3]))
+                out_rot90, _ = model(torch.rot90(images, k=1, dims=[2, 3]))
+                out_rot270, _ = model(torch.rot90(images, k=3, dims=[2, 3]))
 
-                p0 = F.softmax(out_orig, dim=1)
-                p1 = F.softmax(out_flip, dim=1)
-                p2 = F.softmax(out_rot90, dim=1)
-                p3 = F.softmax(out_rot270, dim=1)
+                p0 = F.softmax(out_orig * 15.0, dim=1)
+                p1 = F.softmax(out_flip * 15.0, dim=1)
+                p2 = F.softmax(out_rot90 * 15.0, dim=1)
+                p3 = F.softmax(out_rot270 * 15.0, dim=1)
 
                 avg_probs = (p0 + p1 + p2 + p3) / 4.0
 

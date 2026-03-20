@@ -24,7 +24,7 @@ def main():
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--num_classes', type=int, default=100)
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/34th')
+                        default='./Plot/GradCAM_Outputs/36th')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -71,9 +71,9 @@ def main():
 
             with torch.no_grad():
                 # ⭐ 修正：現在只會回傳 logits
-                outputs = model(input_tensor)
+                outputs, _ = model(input_tensor)
                 probabilities = torch.nn.functional.softmax(
-                    outputs, dim=1)[0]
+                    outputs * 15.0, dim=1)[0]
                 pred_class = probabilities.argmax().item()
                 pred_score = probabilities[pred_class].item()
 

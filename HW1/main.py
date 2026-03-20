@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, SimilarityLDAMLoss
+from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, SimilarityLDAMLoss, get_cb_weights
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -32,6 +32,7 @@ def main():
     EARLY_STOPPING_PATIENCE = config.get('early_stopping_patience', 10)
     NUM_CLASSES = config['num_classes']
     DATA_DIR = config['data_dir']
+    RESUME_TRAINING = config['resume_training']
 
     CHECKPOINT_PATH = config['checkpoint_path']
     BEST_MODEL_PATH = config['best_model_path']
@@ -40,15 +41,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(512, scale=(0.3, 1.0)),
+        transforms.RandomResizedCrop(512, scale=(0.5, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(degrees=15),
         transforms.ColorJitter(brightness=0.1, contrast=0.1),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                             0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.25, scale=(0.02, 0.2))
+                             0.229, 0.224, 0.225])
     ])
 
     val_transform = transforms.Compose([
@@ -79,32 +79,45 @@ def main():
         else:
             param.requires_grad = True
 
-    # ⭐ 恢復使用最乾淨的 CrossEntropyLoss
     train_labels = train_dataset.targets
+    cb_weights = get_cb_weights(
+        train_labels, NUM_CLASSES, beta=0.999).to(device)
     class_sample_count = np.bincount(train_labels, minlength=NUM_CLASSES)
 
     # ⭐ 重新掛載最強的長尾防禦武器 SimilarityLDAMLoss
-    criterion = SimilarityLDAMLoss(
-        cls_num_list=class_sample_count, max_m=0.45, s=20.0, alpha=0.1, keep_ratio=0.7
+    criterion_ldam = SimilarityLDAMLoss(
+        cls_num_list=class_sample_count, max_m=0.35, s=15.0, alpha=0.1, keep_ratio=0.7
     ).to(device)
+
+    criterion_ce = nn.CrossEntropyLoss().to(device)
 
     head_params = []
     backbone_params = []
     for name, param in model.named_parameters():
+        # 1. 執行凍結 (Stem & Layer1)
+        if any(name.startswith(prefix) for prefix in ['stem', 'layer1']):
+            param.requires_grad = False
+        else:
+            param.requires_grad = True
+
+        # 2. 將需更新的參數分配到不同學習率的群組
         if not param.requires_grad:
             continue
-        if 'classifier' in name or 'embedding' in name:
+
+        # 將 bottleneck 和 classifier 歸類為 head_params (高學習率)
+        if 'classifier' in name or 'bottleneck' in name:
             head_params.append(param)
         else:
             backbone_params.append(param)
-
+            
+            
     # 標準的差分學習率
     param_groups = [
         {'params': backbone_params, 'lr': LR_BASE * 0.1},
         {'params': head_params, 'lr': LR_BASE * 2.0},
     ]
 
-    optimizer = optim.AdamW(param_groups, weight_decay=5e-4)
+    optimizer = optim.AdamW(param_groups, weight_decay=1e-3)
 
     # 包含 Warmup 的 CosineAnnealing 排程器
     from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -141,17 +154,42 @@ def main():
                'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
+    if RESUME_TRAINING and os.path.exists(CHECKPOINT_PATH):
+        print(
+            f"🔄 Resume training is enabled. Loading checkpoint from {CHECKPOINT_PATH}...")
+        checkpoint = torch.load(
+            CHECKPOINT_PATH, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_acc = checkpoint['best_val_acc']
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        history = checkpoint['history']
+        epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
+        best_val_preds = checkpoint.get('best_val_preds', [])
+        best_val_labels = checkpoint.get('best_val_labels', [])
+        print(
+            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+    else:
+        print("\n🚀 Starting training from scratch.")
+
     training_start_time = time.time()
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
+
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion, optimizer, device, scaler, max_grad_norm=2.0
+                model, train_loader, criterion_ce, criterion_ldam, cb_weights,
+                epoch+1, optimizer, device, scaler, s=15.0, max_grad_norm=2.0
             )
 
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
-                model, val_loader, criterion, device, s=20.0
+                model, val_loader, criterion_ce, device, s=15.0
             )
 
             scheduler.step()
@@ -180,6 +218,20 @@ def main():
                 epochs_no_improve += 1
                 print(
                     f"No improvement. Early Stopping counter: {epochs_no_improve}/{EARLY_STOPPING_PATIENCE}")
+
+            checkpoint_data = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_acc': best_val_acc,
+                'best_val_loss': best_val_loss,
+                'history': history,
+                'epochs_no_improve': epochs_no_improve,
+                'best_val_preds': best_val_preds,
+                'best_val_labels': best_val_labels,
+            }
+            torch.save(checkpoint_data, CHECKPOINT_PATH)
 
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
                 print(f"\n Early stopping triggered! Stopping training.")

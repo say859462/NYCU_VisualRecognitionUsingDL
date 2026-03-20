@@ -85,35 +85,36 @@ def main():
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            # --- TTA 核心邏輯 ---
+            # --- TTA 核心邏輯 (支援 Tuple 解包與 s 縮放) ---
             if args.tta == 'none':
-                outputs = model(images)
-                avg_probs = F.softmax(outputs, dim=1)
+                out_orig, _ = model(images)
+                probs = torch.softmax(out_orig * DLAM_s, dim=1)
+                final_logits = out_orig * DLAM_s
 
             elif args.tta == 'flip':
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                avg_probs = (F.softmax(out_orig, dim=1) +
-                             F.softmax(out_flip, dim=1)) / 2.0
+                out_orig, _ = model(images)
+                out_flip, _ = model(torch.flip(images, dims=[3]))
+                probs = (torch.softmax(out_orig * DLAM_s, dim=1) +
+                         torch.softmax(out_flip * DLAM_s, dim=1)) / 2.0
+                final_logits = out_orig * DLAM_s
 
             elif args.tta == 'rotational':
-                out_orig = model(images)
-                out_flip = model(torch.flip(images, dims=[3]))
-                out_rot90 = model(torch.rot90(images, k=1, dims=[2, 3]))
-                out_rot270 = model(torch.rot90(images, k=3, dims=[2, 3]))
+                out_orig, _ = model(images)
+                out_flip, _ = model(torch.flip(images, dims=[3]))
+                out_rot90, _ = model(torch.rot90(images, k=1, dims=[2, 3]))
+                out_rot270, _ = model(torch.rot90(images, k=3, dims=[2, 3]))
 
-                p0 = F.softmax(out_orig, dim=1)
-                p1 = F.softmax(out_flip, dim=1)
-                p2 = F.softmax(out_rot90, dim=1)
-                p3 = F.softmax(out_rot270, dim=1)
+                probs = (torch.softmax(out_orig * DLAM_s, dim=1) +
+                         torch.softmax(out_flip * DLAM_s, dim=1) +
+                         torch.softmax(out_rot90 * DLAM_s, dim=1) +
+                         torch.softmax(out_rot270 * DLAM_s, dim=1)) / 4.0
+                final_logits = out_orig * DLAM_s
 
-                avg_probs = (p0 + p1 + p2 + p3) / 4.0
-
-            # ⭐ 注意：因為 outputs 已經乘上 20.0 了，這裡計算 Loss 就是正確的尺度
-            loss = criterion(outputs, labels)
+            # ⭐ 使用正確縮放後的 logits 算 loss
+            loss = criterion(final_logits, labels)
             running_loss += loss.item() * images.size(0)
 
-            _, preds = torch.max(avg_probs, 1)
+            _, preds = torch.max(probs, 1)
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)
 

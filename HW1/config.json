@@ -6,6 +6,6 @@
   "data_dir": "./Dataset/data",
   "checkpoint_path": "./Model_Weight/checkpoint.pth",
   "best_model_path": "./Model_Weight/best_model.pth",
-  "resume_training": true,
+  "resume_training": false,
   "early_stopping_patience": 20
 }
