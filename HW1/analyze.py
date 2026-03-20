@@ -1,119 +1,58 @@
-import torch
-import os
-import numpy as np
-import argparse
+import torch, os, numpy as np, argparse
 from torch.utils.data import DataLoader
 from torchvision import transforms
-import torchvision.transforms.functional as TF
 from tqdm import tqdm
-import torch.nn.functional as F
 from dataset import ImageDataset
 from model import ImageClassificationModel
-from utils import (
-    plot_class_distribution,
-    plot_per_class_error,
-    plot_correlation_analysis,
-    plot_long_tail_accuracy,
-    ClassBalancedFocalLoss
-)
-
+from utils import plot_class_distribution, plot_per_class_error, plot_correlation_analysis, plot_long_tail_accuracy
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Model Analysis with TTA Options")
-    parser.add_argument('--tta', type=str, default='none', choices=['none', 'flip', 'rotational'],
-                        help='TTA mode: none, flip (Horizontal), rotational (4-Crop)')
-    parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth',
-                        help='Path to the model weights')
-
-    parser.add_argument('--config_name', type=str, default='29th',
-                        help='Name for the output directory')
-
-    parser.add_argument('--img_size', type=int, default=512,
-                        help='Crop size for inference')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--tta', type=str, default='none', choices=['none', 'flip', 'rotational'])
+    parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth')
+    parser.add_argument('--config_name', type=str, default='39th')
+    parser.add_argument('--img_size', type=int, default=512)
     args = parser.parse_args()
 
-    # Parameters
-    DATA_DIR = "./Dataset/data"
-    NUM_CLASSES = 100
-    BATCH_SIZE = 16
     PLOT_SAVE_DIR = f"./Plot/{args.config_name}/{args.tta}_tta"
     os.makedirs(PLOT_SAVE_DIR, exist_ok=True)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(
-        f"Device: {device} | TTA Mode: {args.tta} | Image Size: {args.img_size}")
 
-    # 推斷用的 Transform (可以根據需求調整 Resize 大小以榨取效能)
     val_transform = transforms.Compose([
-        transforms.Resize(576),  # 保持比例縮放
-        transforms.CenterCrop(512),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                             0.229, 0.224, 0.225])
+        transforms.Resize(576), transforms.CenterCrop(512),
+        transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    val_dataset = ImageDataset(
-        root_dir=DATA_DIR, split="val", transform=val_transform)
-    val_loader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    val_dataset = ImageDataset(root_dir="./Dataset/data", split="val", transform=val_transform)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
 
-    print("Loading class distribution...")
-    train_dataset = ImageDataset(
-        root_dir=DATA_DIR, split="train", transform=None)
-    train_labels = train_dataset.targets
-
-    model = ImageClassificationModel(
-        num_classes=NUM_CLASSES, pretrained=False).to(device)
-
-    if os.path.exists(args.model_path):
-        model.load_state_dict(torch.load(args.model_path, map_location=device))
-        print(f"Loaded weights from: {args.model_path}")
-    else:
-        print(f"Error: Model not found at {args.model_path}")
-        return
-
-    # 初始化 Loss (用於分析)
-    criterion = torch.nn.CrossEntropyLoss()
-
+    model = ImageClassificationModel(num_classes=100, pretrained=False).to(device)
+    model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
+
+    criterion = torch.nn.CrossEntropyLoss()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
     all_preds, all_labels = [], []
-    DLAM_s = 20.0
+
     with torch.no_grad():
-        pbar = tqdm(val_loader, desc=f"Validating ({args.tta})", colour="cyan")
-        for images, labels in pbar:
+        for images, labels in tqdm(val_loader, desc=f"Validating ({args.tta})", colour="cyan"):
             images, labels = images.to(device), labels.to(device)
 
-            # --- TTA 核心邏輯 (支援 Tuple 解包與 s 縮放) ---
             if args.tta == 'none':
-                out_orig, _ = model(images)
-                probs = torch.softmax(out_orig * DLAM_s, dim=1)
-                final_logits = out_orig * DLAM_s
-
+                logits = model(images)
+                probs = torch.softmax(logits, dim=1)
             elif args.tta == 'flip':
-                out_orig, _ = model(images)
-                out_flip, _ = model(torch.flip(images, dims=[3]))
-                probs = (torch.softmax(out_orig * DLAM_s, dim=1) +
-                         torch.softmax(out_flip * DLAM_s, dim=1)) / 2.0
-                final_logits = out_orig * DLAM_s
-
+                logits = model(images)
+                probs = (torch.softmax(logits, dim=1) + torch.softmax(model(torch.flip(images, dims=[3])), dim=1)) / 2.0
             elif args.tta == 'rotational':
-                out_orig, _ = model(images)
-                out_flip, _ = model(torch.flip(images, dims=[3]))
-                out_rot90, _ = model(torch.rot90(images, k=1, dims=[2, 3]))
-                out_rot270, _ = model(torch.rot90(images, k=3, dims=[2, 3]))
+                logits = model(images)
+                probs = (torch.softmax(logits, dim=1) + 
+                         torch.softmax(model(torch.flip(images, dims=[3])), dim=1) +
+                         torch.softmax(model(torch.rot90(images, k=1, dims=[2, 3])), dim=1) +
+                         torch.softmax(model(torch.rot90(images, k=3, dims=[2, 3])), dim=1)) / 4.0
 
-                probs = (torch.softmax(out_orig * DLAM_s, dim=1) +
-                         torch.softmax(out_flip * DLAM_s, dim=1) +
-                         torch.softmax(out_rot90 * DLAM_s, dim=1) +
-                         torch.softmax(out_rot270 * DLAM_s, dim=1)) / 4.0
-                final_logits = out_orig * DLAM_s
-
-            # ⭐ 使用正確縮放後的 logits 算 loss
-            loss = criterion(final_logits, labels)
+            loss = criterion(logits, labels)
             running_loss += loss.item() * images.size(0)
-
             _, preds = torch.max(probs, 1)
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)
@@ -121,25 +60,13 @@ def main():
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    val_loss = running_loss / total_preds
-    val_acc = (correct_preds / total_preds) * 100
+    print(f"\n [{args.tta.upper()} TTA] Val Loss: {running_loss/total_preds:.4f} | Val Acc: {(correct_preds/total_preds)*100:.2f}%")
 
-    print(
-        f"\n [{args.tta.upper()} TTA Result] Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
-
-    # --- 繪圖分析 ---
-    train_path = os.path.join(DATA_DIR, "train")
-    train_counts = plot_class_distribution(
-        data_dir=train_path, title="Train Set Statistics", output_path=PLOT_SAVE_DIR)
-    error_rates = plot_per_class_error(all_preds, all_labels, num_classes=NUM_CLASSES, save_path=os.path.join(
-        PLOT_SAVE_DIR, "per_class_error.png"))
-    plot_long_tail_accuracy(train_labels=train_labels, val_preds=all_preds,
-                            val_labels=all_labels, save_path=os.path.join(PLOT_SAVE_DIR, "long_tail.png"))
-
-    if train_counts and error_rates:
-        plot_correlation_analysis(train_counts, error_rates, output_path=os.path.join(
-            PLOT_SAVE_DIR, "correlation.png"))
-
+    train_labels = ImageDataset(root_dir="./Dataset/data", split="train", transform=None).targets
+    train_counts = plot_class_distribution(data_dir="./Dataset/data/train", output_path=PLOT_SAVE_DIR)
+    error_rates = plot_per_class_error(all_preds, all_labels, save_path=os.path.join(PLOT_SAVE_DIR, "per_class_error.png"))
+    plot_long_tail_accuracy(train_labels, all_preds, all_labels, save_path=os.path.join(PLOT_SAVE_DIR, "long_tail.png"))
+    plot_correlation_analysis(train_counts, error_rates, output_path=os.path.join(PLOT_SAVE_DIR, "correlation.png"))
 
 if __name__ == "__main__":
     main()

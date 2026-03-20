@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models
+import timm
 from utils import ResidualSpatialAttention
 
 
@@ -28,57 +28,49 @@ class NormedLinear(nn.Module):
 class ImageClassificationModel(nn.Module):
     def __init__(self, num_classes: int = 100, pretrained: bool = True):
         super(ImageClassificationModel, self).__init__()
-        backbone = models.resnext101_32x8d(
-            weights=models.ResNeXt101_32X8D_Weights.DEFAULT if pretrained else None)
+
+        # 載入強大的多尺度 Res2Net101
+        backbone = timm.create_model(
+            'res2net101_26w_4s', pretrained=pretrained)
 
         self.stem = nn.Sequential(
-            backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
+            backbone.conv1, backbone.bn1, backbone.act1, backbone.maxpool)
         self.layer1 = backbone.layer1
         self.layer2 = backbone.layer2
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
-        self.rsa3 = ResidualSpatialAttention(kernel_size=7)
-        self.rsa4 = ResidualSpatialAttention(kernel_size=7)
+        # 唯一的高階注意力裝甲
+        self.rsa = ResidualSpatialAttention(kernel_size=7)
         self.gem = GeM(p=2.5)
 
         self.bottleneck = nn.Sequential(
-            nn.Linear(3072, 512),
+            nn.Linear(2048, 512),
             nn.BatchNorm1d(512),
             nn.PReLU(),
-            nn.Dropout(0.5)
+            nn.Dropout(0.4)
         )
-
-        # ⭐ 只需一個分類頭，Global 和 Local 共享權重
         self.classifier = NormedLinear(512, num_classes)
 
     def extract_features(self, x):
         x = self.stem(x)
         x = self.layer1(x)
         x = self.layer2(x)
+        x = self.layer3(x)
+        f4 = self.layer4(x)
+        f4 = self.rsa(f4)
 
-        f3 = self.layer3(x)
-        f3 = self.rsa3(f3)
-
-        f4 = self.layer4(f3)
-        f4 = self.rsa4(f4)
-
-        # ⭐ 修正 2：恢復 Layer 3 與 Layer 4 的拼接 (Concatenation)
-        pool3 = self.gem(f3).flatten(1)  # [B, 1024]
-        pool4 = self.gem(f4).flatten(1)  # [B, 2048]
-        fused = torch.cat([pool3, pool4], dim=1)  # [B, 3072]
-
-        emb = self.bottleneck(fused)
-        return emb, f4
+        pool = self.gem(f4).flatten(1)
+        emb = self.bottleneck(pool)
+        return emb
 
     def forward(self, x):
-        # ⭐ 單純地提取特徵並分類，順便回傳 f4 給 train.py 做裁切
-        emb, f4 = self.extract_features(x)
+        # ⭐ 移除 f4 回傳，回歸最純粹的 logits 輸出
+        emb = self.extract_features(x)
         logits = self.classifier(emb)
-        return logits, f4
+        return logits
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
-        print(
-            f"📊 ResNeXt (Clean Architecture) Status: {total/1e6:.2f}M params")
+        print(f"📊 Res2Net101 (Pure) Status: {total/1e6:.2f}M params")
         return total < 100_000_000

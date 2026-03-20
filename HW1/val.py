@@ -1,32 +1,22 @@
 import torch
 from tqdm import tqdm
 
-# ⭐ 加上 s=20.0 參數
-
-
-def validate_one_epoch(model, val_loader, criterion, device, s=20.0):
+def validate_one_epoch(model, val_loader, criterion, device):
     model.eval()
-    running_loss = 0.0
-    correct_preds = 0
-    total_preds = 0
-
-    all_predictions = []
-    all_targets = []
+    running_loss, correct_preds, total_preds = 0.0, 0, 0
+    all_predictions, all_targets = [], []
 
     pbar = tqdm(val_loader, desc="Validating", leave=False, colour="green")
     with torch.no_grad():
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            outputs, _ = model(images)
-            scaled_outputs = outputs * s
-
-            loss = criterion(scaled_outputs, labels)
+            # ⭐ 直接取用 Logits
+            outputs = model(images)
+            loss = criterion(outputs, labels)
 
             running_loss += loss.item() * images.size(0)
-
-            # ⭐ 改用 scaled_outputs 預測
-            _, preds = torch.max(scaled_outputs, 1)
+            _, preds = torch.max(outputs, 1)
 
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)

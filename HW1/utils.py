@@ -1,148 +1,36 @@
 import os
-import matplotlib.pyplot as plt
+import random
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
-from torchvision import transforms
-import random
 import torchvision.transforms.functional as TF
-
-# ⭐ 1. 殘差空間注意力 (RSA)
 
 
 class ResidualSpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
         super().__init__()
-        padding = kernel_size // 2
-        self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.conv = nn.Conv2d(
+            2, 1, kernel_size, padding=kernel_size//2, bias=False)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         avg_out = torch.mean(x, dim=1, keepdim=True)
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        attn = torch.cat([avg_out, max_out], dim=1)
-        attn = self.conv(attn)
-        attn = self.sigmoid(attn)
+        attn = self.sigmoid(self.conv(torch.cat([avg_out, max_out], dim=1)))
         return x * (1 + attn)
-
-# ⭐ 2. Class-Balanced Weights
 
 
 def get_cb_weights(labels_list, num_classes=100, beta=0.999):
     class_counts = np.bincount(labels_list, minlength=num_classes)
-    cb_weights = []
-    for count in class_counts:
-        if count == 0:
-            cb_weights.append(0.0)
-        else:
-            weight = (1.0 - beta) / (1.0 - np.power(beta, count))
-            cb_weights.append(weight)
-
+    cb_weights = [(1.0 - beta) / (1.0 - np.power(beta, count))
+                  if count > 0 else 0.0 for count in class_counts]
     cb_weights = np.array(cb_weights)
-    cb_weights = cb_weights / np.sum(cb_weights) * num_classes
-    return torch.FloatTensor(cb_weights)
-
-# ⭐ 3. 升級版 SimilarityLDAMLoss (整合 CB Weight 乘積)
+    return torch.FloatTensor(cb_weights / np.sum(cb_weights) * num_classes)
 
 
-class SimilarityLDAMLoss(nn.Module):
-    def __init__(self, cls_num_list, max_m=0.35, s=15.0, alpha=0.1, keep_ratio=0.7):
-        super(SimilarityLDAMLoss, self).__init__()
-        m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
-        m_list = m_list * (max_m / np.max(m_list))
-        self.register_buffer('m_list', torch.FloatTensor(m_list))
-        self.s = s
-        self.alpha = alpha
-        self.keep_ratio = keep_ratio
-
-    def forward(self, x, target, classifier_weights, cb_weights=None):
-        index = torch.zeros_like(x, dtype=torch.bool)
-        index.scatter_(1, target.data.view(-1, 1), True)
-        batch_m = self.m_list[target]
-        x_m = x - batch_m.view(-1, 1)
-        output = torch.where(index, x_m, x)
-
-        norm_weights = F.normalize(classifier_weights.detach(), p=2, dim=0)
-        sim_matrix = torch.mm(norm_weights.t(), norm_weights)
-        sim_matrix.fill_diagonal_(-1e9)
-        sim_dist = F.softmax(sim_matrix * self.s, dim=1)
-        batch_sim_dist = sim_dist[target]
-
-        one_hot = torch.zeros_like(x).scatter_(1, target.view(-1, 1), 1.0)
-        soft_targets = (1 - self.alpha) * one_hot + self.alpha * batch_sim_dist
-
-        log_probs = F.log_softmax(self.s * output, dim=1)
-        loss_unreduced = -(soft_targets * log_probs).sum(dim=1)
-
-        # 套用長尾權重
-        if cb_weights is not None:
-            loss_unreduced = loss_unreduced * cb_weights[target]
-
-        if self.keep_ratio < 1.0:
-            num_hard = int(loss_unreduced.size(0) * self.keep_ratio)
-            loss_unreduced, _ = loss_unreduced.topk(num_hard)
-
-        return loss_unreduced.mean()
-
-
-def get_attention_crops(images, activation_maps, threshold=0.6):
-    """
-    基於語義激發圖 (Activation Map) 進行局部裁切，並加上邊緣 Padding
-    """
-    B, C, H, W = images.shape
-    # 將激發圖縮放至原始影像大小
-    attn_resized = F.interpolate(activation_maps, size=(
-        H, W), mode='bilinear', align_corners=False)
-
-    cropped_images = torch.zeros_like(images)
-    for i in range(B):
-        # 歸一化激發圖並進行閾值過濾
-        mask = attn_resized[i, 0]
-        mask = (mask - mask.min()) / (mask.max() - mask.min() + 1e-8)
-        binary_mask = mask > threshold
-        coords = torch.nonzero(binary_mask)
-
-        if coords.size(0) > 10:
-            ymin, xmin = coords.min(dim=0)[0]
-            ymax, xmax = coords.max(dim=0)[0]
-
-            pad_y = int((ymax - ymin) * 0.1)
-            pad_x = int((xmax - xmin) * 0.1)
-
-            ymin = max(0, ymin - pad_y)
-            xmin = max(0, xmin - pad_x)
-            ymax = min(H - 1, ymax + pad_y)
-            xmax = min(W - 1, xmax + pad_x)
-
-            # 確保裁切區域不會過小
-            if (ymax - ymin) < H // 4 or (xmax - xmin) < W // 4:
-                cropped_images[i] = images[i]
-            else:
-                crop = images[i:i+1, :, ymin:ymax+1, xmin:xmax+1]
-                cropped_images[i] = F.interpolate(
-                    crop, size=(H, W), mode='bilinear')[0]
-        else:
-            cropped_images[i] = images[i]
-
-    return cropped_images
-
-# Custom utilities for training, analysis, and visualization
-
-
-class RandomDiscreteRotation:
-
-    def __init__(self, angles=[0, 90, 270], weights=[0.7, 0.15, 0.15]):
-        self.angles = angles
-        self.weights = weights
-
-    def __call__(self, img):
-        angle = random.choices(self.angles, weights=self.weights)[0]
-        return TF.rotate(img, angle)
-
-
-# Custom loss function for class-balanced focal loss
 class ClassBalancedFocalLoss(nn.Module):
     def __init__(self, cb_weights, gamma=2.0, label_smoothing=0.0):
         super().__init__()
@@ -151,366 +39,92 @@ class ClassBalancedFocalLoss(nn.Module):
         self.label_smoothing = label_smoothing
 
     def forward(self, inputs, targets):
-
         ce_loss_unweighted = F.cross_entropy(
-            inputs, targets,
-            label_smoothing=self.label_smoothing,
-            reduction='none'
-        )
+            inputs, targets, label_smoothing=self.label_smoothing, reduction='none')
         pt = torch.exp(-ce_loss_unweighted)
-
         focal_weight = (1 - pt) ** self.gamma
-
-        batch_weights = self.cb_weights[targets]
-        focal_loss = batch_weights * focal_weight * ce_loss_unweighted
-
-        return focal_loss.mean()
-# Custom LDAM Loss for long-tail learning
-# Reference: https://arxiv.org/pdf/1906.07413.pdf
+        return (self.cb_weights[targets] * focal_weight * ce_loss_unweighted).mean()
 
 
-class LDAMLoss(nn.Module):
-    def __init__(self, cls_num_list, max_m=0.5, weight=None, s=1.0):
-        """
-        LDAM Loss (Label-Distribution-Aware Margin Loss)
-        Args:
-            cls_num_list (list/array): 每個類別的訓練樣本數列表。
-            max_m (float): 最大的 Margin 懲罰值，控制決策邊界的推擠程度。
-            weight (tensor, optional): 用於 DRW 的類別權重。
-            s (float): Logit 縮放係數 (若未對特徵做 L2 Normalize，建議設為 1.0)。
-        """
-        super(LDAMLoss, self).__init__()
-        # 根據類別樣本數計算 Margin (樣本越少，Margin 越大)
-        m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
-        m_list = m_list * (max_m / np.max(m_list))
+class RandomDiscreteRotation:
+    def __init__(self, angles=[0, 90, 270], weights=[0.7, 0.15, 0.15]):
+        self.angles, self.weights = angles, weights
 
-        # 註冊為 buffer 以確保在多 GPU 或 Device 轉換時能自動跟隨
-        self.register_buffer('m_list', torch.FloatTensor(m_list))
-        self.s = s
-        self.weight = weight
+    def __call__(self, img):
+        return TF.rotate(img, random.choices(self.angles, weights=self.weights)[0])
 
-    def forward(self, x, target):
-        # 建立與 logits 相同大小的 one-hot mask
-        index = torch.zeros_like(x, dtype=torch.bool)
-        index.scatter_(1, target.data.view(-1, 1), True)
-
-        # 取得對應 target 的 Margin 值
-        batch_m = self.m_list[target]
-
-        # 對 Ground Truth 對應的 Logit 扣除 Margin
-        x_m = x - batch_m.view(-1, 1)
-
-        # 將扣除 Margin 的 logit 與原本的 logit 組合
-        output = torch.where(index, x_m, x)
-
-        # 計算 Cross Entropy，此處可傳入 weight 以支援 DRW
-        return F.cross_entropy(self.s * output, target, weight=self.weight, label_smoothing=0.01)
+# 繪圖函數保持不變
 
 
-class ProcessCrops:
-    """
-    A custom transform class to process the crops generated by FiveCrop or TenCrop.
-    """
-
-    def __init__(self):
-        self.to_tensor = transforms.ToTensor()
-        self.normalize = transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
-
-    def __call__(self, crops):
-        return torch.stack([self.normalize(self.to_tensor(crop)) for crop in crops])
-
-
-def plot_class_distribution(
-    data_dir: str = "./Dataset/data/train",
-    title: str = "Dataset Class Distribution",
-    output_path: str = "./Figures",
-):
-    """Summarize the distribution in the given dataset path , and plot the figure
-
-    Args:
-        data_dir (str): The path where the dataset located
-        title (str, optional): Title of the figure. Defaults to "Dataset Class Distribution".
-        output_path (str) : The location where the figures should be saved
-    """
-
-    if not os.path.exists(output_path):
-        os.makedirs(output_path, exist_ok=True)
-
-    class_counts = {}
-    total_samples = 0
-
-    # Check the existence of dataset directory
-    if not os.path.exists(data_dir):
-        print(f"{data_dir} is not exist")
-        return None
-
-    # Traverse the dataset
-    for class_name in os.listdir(data_dir):
-        class_path = os.path.join(data_dir, class_name)
-
-        if os.path.isdir(class_path):
-            # Calculating the number of data in a specific class directory
-            num_samples = len([f for f in os.listdir(class_path)])
-            class_counts[class_name] = num_samples
-            total_samples += num_samples
-
-    # Make sure that the order of class label is in increasing order
-    # Sorting is based on the magnitude of class label
-    sorted_classes = sorted(class_counts.keys(), key=lambda x: int(x))
-    counts = [class_counts[c] for c in sorted_classes]
-
-    # -------------------------- Plot the figure --------------------------
+def plot_class_distribution(data_dir, title="Dataset Class Distribution", output_path="./Figures"):
+    os.makedirs(output_path, exist_ok=True)
+    counts = [len(os.listdir(os.path.join(data_dir, c)))
+              for c in sorted(os.listdir(data_dir), key=int)]
     plt.figure(figsize=(18, 6))
-    plt.bar(sorted_classes, counts, color="skyblue", edgecolor="black")
-
-    plt.title(f"{title} (Total: {total_samples} images)", fontsize=16)
-    plt.xlabel("Class Label", fontsize=12)
-    plt.ylabel("Number of Images", fontsize=12)
-
-    # Average baseline
-    avg_count = total_samples / len(sorted_classes)
-    plt.axhline(
-        y=avg_count,
-        color="red",
-        linestyle="--",
-        label=f"Average ({avg_count:.1f}/class)",
-    )
-
-    plt.xticks(rotation=90, fontsize=8)
-    plt.legend()
-    plt.tight_layout()
-
-    # Save figure
-    save_path = os.path.join(
-        output_path, f"{title.replace(' ', '_')}_distribution.png")
-    plt.savefig(save_path)
-
+    plt.bar(range(len(counts)), counts, color="skyblue", edgecolor="black")
+    plt.axhline(y=np.mean(counts), color="red", linestyle="--")
+    plt.savefig(os.path.join(
+        output_path, f"{title.replace(' ', '_')}_distribution.png"))
     plt.close()
-    # -------------------------- Plot the figure --------------------------
-    print(f"Figure is plotted successfully. Stored to ：{save_path}")
     return counts
 
 
 def plot_training_curves(train_losses, val_losses, train_accs, val_accs, save_path="./Plot/training_curves.png"):
-    """Plot training and validation loss and accuracy curves."""
-    epochs = range(1, len(train_losses) + 1)
-    plt.figure(figsize=(12, 6))
-
-    # Loss Plot
-    ax1 = plt.subplot(1, 2, 1)
-    ax1.plot(epochs, train_losses, 'b-', label='Training Loss')
-    ax1.plot(epochs, val_losses, 'r-', label='Validation Loss')
-
-    if val_losses:
-        best_val_loss = min(val_losses)
-        best_loss_epoch = val_losses.index(best_val_loss) + 1
-
-        ax1.plot(best_loss_epoch, best_val_loss, 'ro',
-                 label=f'Best Loss ({best_val_loss:.4f})')
-
-        ax1.axvline(x=best_loss_epoch, color='red', linestyle=':', alpha=0.5)
-
-        ax1.text(best_loss_epoch, best_val_loss, f' {best_val_loss:.4f}',
-                 color='red', fontweight='bold', va='bottom')
-
-    ax1.set_title('Loss')
-    ax1.set_xlabel('Epochs')
-    ax1.set_ylabel('Loss')
-    ax1.legend()
-    ax1.grid(True, linestyle='--', alpha=0.6)
-
-    # Accuracy Plot
-    ax2 = plt.subplot(1, 2, 2)
-    ax2.plot(epochs, train_accs, 'b-', label='Training Accuracy')
-    ax2.plot(epochs, val_accs, 'r-', label='Validation Accuracy')
-
-    if val_accs:
-        best_val_acc = max(val_accs)
-        best_acc_epoch = val_accs.index(best_val_acc) + 1
-
-        ax2.plot(best_acc_epoch, best_val_acc, 'ro',
-                 label=f'Best Acc ({best_val_acc:.2f}%)')
-
-        ax2.axvline(x=best_acc_epoch, color='red', linestyle=':', alpha=0.5)
-
-        ax2.text(best_acc_epoch, best_val_acc, f' {best_val_acc:.2f}%',
-                 color='red', fontweight='bold', va='bottom')
-
-    ax2.set_title('Accuracy')
-    ax2.set_xlabel('Epochs')
-    ax2.set_ylabel('Accuracy (%)')
-    ax2.legend(loc='lower right')
-    ax2.grid(True, linestyle='--', alpha=0.6)
-
-    plt.tight_layout()
-
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    epochs = range(1, len(train_losses) + 1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    ax1.plot(epochs, train_losses, 'b-', label='Train Loss')
+    ax1.plot(epochs, val_losses, 'r-', label='Val Loss')
+    if val_losses:
+        ax1.axvline(val_losses.index(min(val_losses)) +
+                    1, color='red', linestyle=':')
+    ax1.legend()
+    ax1.set_title('Loss')
+    ax2.plot(epochs, train_accs, 'b-', label='Train Acc')
+    ax2.plot(epochs, val_accs, 'r-', label='Val Acc')
+    if val_accs:
+        ax2.axvline(val_accs.index(max(val_accs)) +
+                    1, color='red', linestyle=':')
+    ax2.legend()
+    ax2.set_title('Accuracy')
     plt.savefig(save_path)
     plt.close()
-    print(f"Training curves plotted successfully. Stored to ：{save_path}")
 
 
 def plot_per_class_error(all_preds, all_labels, num_classes=100, save_path="./Plot/class_error_dist.png"):
-    # Plot the per-class error distribution based on the predictions and true labels from validation set
-
-    error_rates = []
-    class_ids = range(num_classes)
-
-    all_preds = np.array(all_preds)
-    all_labels = np.array(all_labels)
-
-    for c in class_ids:
-        # Calculate the total number of samples for class c
-        class_mask = (all_labels == c)
-        total_class_samples = np.sum(class_mask)
-
-        if total_class_samples > 0:
-            # Calculate the number of incorrect predictions for class c
-            incorrect_samples = np.sum(all_preds[class_mask] != c)
-            error_rate = (incorrect_samples /
-                          total_class_samples) * 100  # Percentage
-        else:
-            error_rate = 0.0
-
-        error_rates.append(error_rate)
-
-    # Plotting the error distribution
-    plt.figure(figsize=(18, 6))
-    plt.bar(class_ids, error_rates, color='salmon', edgecolor='black')
-
-    plt.title('Validation Error Rate per Class (Best Model)',
-              fontsize=16, fontweight='bold')
-    plt.xlabel('Class ID', fontsize=12)
-    plt.ylabel('Error Rate (%)', fontsize=12)
-
-    # Adding average error rate line for reference
-    avg_error = np.mean(error_rates)
-    plt.axhline(y=avg_error, color='red', linestyle='--',
-                linewidth=2, label=f'Avg Error ({avg_error:.2f}%)')
-
-    plt.xticks(class_ids, rotation=90, fontsize=6)
-    plt.legend()
-    plt.tight_layout()
-
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    error_rates = [np.sum(np.array(all_preds)[np.array(all_labels) == c] != c) / np.sum(np.array(
+        all_labels) == c) * 100 if np.sum(np.array(all_labels) == c) > 0 else 0 for c in range(num_classes)]
+    plt.figure(figsize=(18, 6))
+    plt.bar(range(num_classes), error_rates, color='salmon', edgecolor='black')
+    plt.axhline(y=np.mean(error_rates), color='red', linestyle='--')
     plt.savefig(save_path)
     plt.close()
-
     return error_rates
 
 
+def plot_long_tail_accuracy(train_labels, val_preds, val_labels, num_classes=100, save_path="./Plot/long_tail_acc.png"):
+    train_counts, val_accs = np.bincount(
+        train_labels, minlength=num_classes), np.zeros(num_classes)
+    for c in range(num_classes):
+        val_accs[c] = np.sum(np.array(val_preds)[np.array(val_labels) == c] == c) / np.sum(
+            np.array(val_labels) == c) * 100 if np.sum(np.array(val_labels) == c) > 0 else 0
+    sorted_idx = np.argsort(train_counts)[::-1]
+    fig, ax1 = plt.subplots(figsize=(16, 6))
+    ax1.bar(range(num_classes),
+            train_counts[sorted_idx], color='skyblue', alpha=0.6)
+    ax2 = ax1.twinx()
+    ax2.plot(range(num_classes),
+             val_accs[sorted_idx], color='red', marker='o', markersize=4)
+    plt.savefig(save_path)
+    plt.close()
+
+
 def plot_correlation_analysis(train_counts, error_rates, output_path="./Plot/correlation_analysis.png"):
-    """Analyze the correlation between the number of training samples per class and the validation error rate for each class, and plot the figure."""
-    if len(train_counts) != len(error_rates):
-        print("Error: Length of train_counts and error_rates must be the same.")
-        return
-
-    # Calculate Pearson correlation coefficient and p-value
-    corr, p_value = pearsonr(train_counts, error_rates)
-
+    corr, p = pearsonr(train_counts, error_rates)
     plt.figure(figsize=(10, 7))
-    plt.scatter(train_counts, error_rates, alpha=0.6,
-                color='darkblue', edgecolors='w', s=100)
-
-    # Plotting the trendline
+    plt.scatter(train_counts, error_rates, alpha=0.6, color='darkblue')
     z = np.polyfit(train_counts, error_rates, 1)
-    p = np.poly1d(z)
-    plt.plot(train_counts, p(train_counts), "r--", alpha=0.8,
-             label=f"Trendline (y={z[0]:.2f}x+{z[1]:.2f})")
-
-    plt.title(
-        f"Correlation: Sample Count vs Error Rate\nPearson r = {corr:.4f} (p = {p_value:.4f})", fontsize=14)
-    plt.xlabel("Number of Training Images", fontsize=12)
-    plt.ylabel("Validation Error Rate (%)", fontsize=12)
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.legend()
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.plot(train_counts, np.poly1d(z)(train_counts), "r--")
     plt.savefig(output_path)
     plt.close()
-
-    print(f"Correlation analysis saved to : {output_path}")
-    print(f"Detected Pearson Correlation: {corr:.4f}")
-
-# This function is used to compare the error distribution of two different models, and plot the figure
-# Transparent one is the old model
-
-
-def plot_compare_error_dist(error_rates_old_path, error_rates_new_path, num_classes=100, save_path="./Plot/compare_error.png"):
-    from PIL import Image
-
-    img_old = Image.open(error_rates_old_path).convert("RGBA")
-    img_new = Image.open(error_rates_new_path).convert("RGBA")
-
-    img_new = img_new.resize(img_old.size)
-
-    blended_img = Image.blend(img_old, img_new, alpha=0.5)
-
-    blended_img.save("./Plot/error_dist_blended.png")
-    print("Stack complete , Store to : ./Plot/error_dist_blended.png")
-
-
-def plot_long_tail_accuracy(train_labels, val_preds, val_labels, num_classes=100, save_path="./Plot/long_tail_acc.png"):
-    """
-    Plot the relationship between class frequency in the training set and validation accuracy for each class, sorted by class frequency (
-    """
-
-    # 1. Calculate the number of training samples for each class
-    train_counts = np.bincount(train_labels, minlength=num_classes)
-
-    # 2. Calculate the validation accuracy for each class
-    val_preds = np.array(val_preds)
-    val_labels = np.array(val_labels)
-    val_accs = np.zeros(num_classes)
-
-    for c in range(num_classes):
-        idx = (val_labels == c)
-        if np.sum(idx) > 0:
-            correct = np.sum(val_preds[idx] == val_labels[idx])
-            val_accs[c] = correct / np.sum(idx) * 100
-        else:
-            val_accs[c] = 0.0
-
-    # 3. Sort classes by training frequency
-    sorted_indices = np.argsort(train_counts)[::-1]
-    sorted_train_counts = train_counts[sorted_indices]
-    sorted_val_accs = val_accs[sorted_indices]
-
-    fig, ax1 = plt.subplots(figsize=(16, 6))
-
-    # 4. Plot the background bar chart (training sample count)
-    color = 'skyblue'
-    ax1.set_xlabel(
-        'Classes Sorted by Training Frequency (Head -> Tail)', fontsize=12)
-    ax1.set_ylabel('Number of Training Images', color=color, fontsize=12)
-    ax1.bar(range(num_classes), sorted_train_counts,
-            color=color, alpha=0.6, label='Train Sample Count')
-    ax1.tick_params(axis='y', labelcolor=color)
-
-    ax1.set_xticks(range(0, num_classes, 5))
-    ax1.set_xticklabels([f"#{sorted_indices[i]}" for i in range(
-        0, num_classes, 5)], rotation=45, fontsize=8)
-
-    ax2 = ax1.twinx()
-    color = 'red'
-    ax2.set_ylabel('Validation Accuracy (%)', color=color, fontsize=12)
-    ax2.plot(range(num_classes), sorted_val_accs, color=color, marker='o',
-             markersize=4, linestyle='-', linewidth=2, label='Val Accuracy')
-    ax2.tick_params(axis='y', labelcolor=color)
-    ax2.set_ylim(-5, 105)
-
-    plt.title('Long-Tail Diagnostic: Accuracy vs. Class Frequency',
-              fontsize=14, fontweight='bold')
-    fig.tight_layout()
-    plt.grid(True, linestyle='--', alpha=0.5)
-
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-
-if __name__ == "__main__":
-    plot_compare_error_dist('./Plot/4th/error_dist.png',
-                            './Plot/error_dist.png')
