@@ -48,7 +48,7 @@ def main():
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.3, scale=(0.02, 0.1), ratio=(0.3, 3.3))
+        transforms.RandomErasing(p=0.15, scale=(0.02, 0.05), ratio=(0.5, 2.0))
     ])
 
     val_transform = transforms.Compose([
@@ -73,19 +73,16 @@ def main():
 
     head_params, backbone_params = [], []
     for name, param in model.named_parameters():
-        if any(name.startswith(prefix) for prefix in ['stem', 'layer1']):
-            param.requires_grad = False
+        param.requires_grad = True
+        if 'classifier' in name or 'bottleneck' in name:
+            head_params.append(param)
         else:
-            param.requires_grad = True
-            if 'classifier' in name or 'bottleneck' in name:
-                head_params.append(param)
-            else:
-                backbone_params.append(param)
+            backbone_params.append(param)
 
     # ⭐ 降回標準 1e-4 的 Weight Decay
     optimizer = optim.AdamW([
-        {'params': backbone_params, 'lr': LR_BASE * 0.1},
-        {'params': head_params, 'lr': LR_BASE * 2.0},
+        {'params': backbone_params, 'lr': LR_BASE * 1.0},
+        {'params': head_params, 'lr': LR_BASE * 3.0},
     ], weight_decay=1e-4)
 
     train_labels = train_dataset.targets
@@ -94,7 +91,7 @@ def main():
 
     # ⭐ 採用更溫和且有效的 Class-Balanced Focal Loss
     criterion_train = ClassBalancedFocalLoss(
-        cb_weights=cb_weights, gamma=2.0).to(device)
+        cb_weights=cb_weights, gamma=1.5, label_smoothing=0.05).to(device)
     criterion_val = nn.CrossEntropyLoss().to(device)
 
     from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -102,19 +99,19 @@ def main():
     class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-6, last_epoch=-1):
             self.warmup_epochs = warmup_epochs
-            self.cosine_scheduler = CosineAnnealingLR(
-                optimizer, T_max=T_max - warmup_epochs, eta_min=eta_min)
+            self.T_max = T_max
+            self.eta_min = eta_min
             super().__init__(optimizer, last_epoch)
 
         def get_lr(self):
+            # 1. Warmup 階段：線性爬升
             if self.last_epoch < self.warmup_epochs:
                 return [base_lr * ((self.last_epoch + 1) / self.warmup_epochs) for base_lr in self.base_lrs]
-            return self.cosine_scheduler.get_lr()
 
-        def step(self, epoch=None):
-            if self.last_epoch >= self.warmup_epochs - 1:
-                self.cosine_scheduler.step(epoch)
-            super().step(epoch)
+            # 2. Cosine Annealing 階段：平滑下降
+            progress = (self.last_epoch - self.warmup_epochs) / \
+                (self.T_max - self.warmup_epochs)
+            return [self.eta_min + (base_lr - self.eta_min) * (1 + math.cos(math.pi * progress)) / 2 for base_lr in self.base_lrs]
 
     scheduler = WarmUpCosineAnnealingLR(
         optimizer, T_max=NUM_EPOCHS, warmup_epochs=5, eta_min=1e-6)

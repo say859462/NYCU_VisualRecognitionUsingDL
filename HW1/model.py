@@ -16,13 +16,16 @@ class GeM(nn.Module):
 
 
 class NormedLinear(nn.Module):
-    def __init__(self, in_features, out_features):
+    def __init__(self, in_features, out_features, s=30.0):
         super(NormedLinear, self).__init__()
         self.weight = nn.Parameter(torch.Tensor(in_features, out_features))
+        self.s = s
         self.weight.data.uniform_(-1, 1).renorm_(2, 1, 1e-5).mul_(1e5)
 
     def forward(self, x):
-        return torch.mm(F.normalize(x, p=2, dim=1), F.normalize(self.weight, p=2, dim=0))
+        cosine = torch.mm(F.normalize(x, p=2, dim=1),
+                          F.normalize(self.weight, p=2, dim=0))
+        return cosine * self.s  # ⭐ 讓 Logits 擴展到 [-30, 30]，徹底喚醒 Softmax
 
 
 class ImageClassificationModel(nn.Module):
@@ -50,7 +53,7 @@ class ImageClassificationModel(nn.Module):
             nn.PReLU(),
             nn.Dropout(0.4)
         )
-        self.classifier = NormedLinear(512, num_classes)
+        self.classifier = nn.Linear(512, num_classes)
 
     def extract_features(self, x):
         x = self.stem(x)
