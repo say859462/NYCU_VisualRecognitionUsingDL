@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/41th')
+                        default='./Plot/GradCAM_Outputs/42th')
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,10 +31,10 @@ def main():
     model.eval()
 
     # ⭐ 因為 model 現在只回傳 logits，不需要 Wrapper 了！直接綁定！
-    cam = GradCAM(model=model, target_layers=[model.rsa])
+    cam = GradCAM(model=model, target_layers=[model.layer4[-1]])
 
     preprocess_geo = transforms.Compose(
-        [transforms.Resize(640), transforms.CenterCrop(576)])
+        [transforms.Resize(600), transforms.CenterCrop(512)])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(), transforms.Normalize(
             [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -65,7 +65,8 @@ def main():
 
             with torch.no_grad():
                 logits = model(input_tensor)
-                probs = torch.nn.functional.softmax(logits, dim=1)[0]
+                # ⭐ 修正：乘上 30.0 讓 Softmax 能正確運作
+                probs = torch.nn.functional.softmax(logits * 30.0, dim=1)[0]
                 pred_class, pred_score = probs.argmax().item(), probs.max().item()
 
             grayscale_cam = cam(input_tensor=input_tensor, targets=None)[0, :]

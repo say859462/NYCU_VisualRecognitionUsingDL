@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, ClassBalancedFocalLoss, get_cb_weights, RandomDiscreteRotation
+from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, LDAMLoss, get_cb_weights, RandomDiscreteRotation
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -11,6 +11,7 @@ import time
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import argparse
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -42,18 +43,18 @@ def main():
 
     # ⭐ 移除銳利化，加入 RandomErasing 來抹除「大拇指」等作弊特徵
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(576, scale=(0.5, 1.0)),
+        transforms.RandomResizedCrop(512, scale=(0.5, 1.0)),
         transforms.RandomHorizontalFlip(p=0.5),
-        RandomDiscreteRotation(angles=[0, 90, 270]),
+        transforms.RandomRotation(15),
         transforms.ColorJitter(brightness=0.1, contrast=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.15, scale=(0.02, 0.05), ratio=(0.5, 2.0))
+        transforms.RandomErasing(p=0.2, scale=(0.02, 0.2), ratio=(0.5, 2.0))
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(640), transforms.CenterCrop(576),
+        transforms.Resize(600), transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
@@ -72,10 +73,10 @@ def main():
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=True).to(device)
 
-    head_params = [p for n, p in model.named_parameters(
-    ) if 'classifier' in n or 'bottleneck' in n or 'se' in n or 'rsa' in n]
+    head_params = [p for n, p in model.named_parameters() if any(
+        x in n for x in ['classifier', 'side2', 'side3', 'side4'])]
     backbone_params = [p for n, p in model.named_parameters() if not any(
-        x in n for x in ['classifier', 'bottleneck', 'se', 'rsa'])]
+        x in n for x in ['classifier', 'side2', 'side3', 'side4'])]
 
     # ⭐ 降回標準 1e-4 的 Weight Decay
     optimizer = optim.AdamW([
@@ -83,16 +84,27 @@ def main():
         {'params': head_params, 'lr': LR_BASE * 3.0},
     ], weight_decay=3e-4)
 
-    train_labels = train_dataset.targets
+    # 1. 取得各類別的訓練圖片數量與 CB Weights
+    train_counts = np.bincount(train_dataset.targets, minlength=NUM_CLASSES)
     cb_weights = get_cb_weights(
-        train_labels, NUM_CLASSES, beta=0.999).to(device)
+        train_dataset.targets, NUM_CLASSES, beta=0.999).to(device)
 
-    criterion_ce = nn.CrossEntropyLoss(
-        label_smoothing=0.1).to(device)  # 第一階段：專注基礎特徵學習
-    criterion_focal = ClassBalancedFocalLoss(
-        cb_weights=cb_weights, gamma=1.5, label_smoothing=0.05).to(device)  # 第二階段：專殺長尾困難樣本
+    criterion_ldam_clean = LDAMLoss(
+        cls_num_list=train_counts, max_m=0.5, s=30.0, weight=None).to(device)
 
-    criterion_val = nn.CrossEntropyLoss().to(device)
+    criterion_ldam_drw = LDAMLoss(
+        cls_num_list=train_counts, max_m=0.5, s=30.0, weight=cb_weights).to(device)
+
+    class ScaledCrossEntropyLoss(nn.Module):
+        def __init__(self, s=30.0):
+            super().__init__()
+            self.s = s
+
+        def forward(self, inputs, targets):
+            # 在算 CE 前，把 [-1, 1] 放大回 [-30, 30]
+            return F.cross_entropy(inputs * self.s, targets)
+
+    criterion_val = ScaledCrossEntropyLoss(s=30.0).to(device)
 
     from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -147,17 +159,19 @@ def main():
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
             if epoch < DRW_EPOCH:
-                criterion_train = criterion_ce
+                criterion_train = criterion_ldam_clean
                 if epoch == 0:
-                    print("🔵 Stage 1: Standard CE Loss Activated (Focus on Foundation)")
+                    print("🔵 Stage 1: LDAM Loss Activated (Focus on Margins)")
             else:
-                criterion_train = criterion_focal
+                criterion_train = criterion_ldam_drw
                 if epoch == DRW_EPOCH:
-                    print("🔥 Stage 2: CB Focal Loss Activated (Focus on Long-Tail)")
+                    print(
+                        "🔥 Stage 2: LDAM + DRW Weights Activated (Focus on Long-Tail)")
 
             # 傳入動態切換的 criterion_train
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterion_train, epoch+1, optimizer, device, scaler)
+
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
                 model, val_loader, criterion_val, device)
             scheduler.step()

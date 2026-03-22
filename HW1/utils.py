@@ -8,6 +8,49 @@ import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
 import torchvision.transforms.functional as TF
 
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class LDAMLoss(nn.Module):
+    def __init__(self, cls_num_list, max_m=0.5, weight=None, s=1.0):
+        """
+        LDAM Loss (Label-Distribution-Aware Margin Loss)
+        :param cls_num_list: 每個類別的樣本數量列表 (list or numpy array)
+        :param max_m: 最大 Margin 值 (預設 0.5)
+        :param weight: 類別權重 (DRW 策略會在第二階段傳入 CB_Weights)
+        :param s: 縮放因子 (若您的 Classifier 是標準 nn.Linear，建議設 1.0；若是 Cosine 分類器，通常設 30)
+        """
+        super(LDAMLoss, self).__init__()
+        # 核心公式：Margin 與樣本數的四次方根成反比
+        m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
+        m_list = m_list * (max_m / np.max(m_list))
+        self.m_list = torch.FloatTensor(m_list)
+        self.s = s
+        self.weight = weight
+
+    def forward(self, x, target):
+        # 建立與 logits (x) 大小相同的 boolean mask
+        index = torch.zeros_like(x, dtype=torch.bool)
+        index.scatter_(1, target.data.view(-1, 1), 1)
+
+        # 取得每個 batch 樣本對應的 margin
+        index_float = index.type(torch.FloatTensor).to(x.device)
+        batch_m = torch.matmul(self.m_list[None, :].to(
+            x.device), index_float.transpose(0, 1))
+        batch_m = batch_m.view((-1, 1))
+
+        # 將正確類別的 logit 減去 margin (強迫模型拉開安全距離)
+        x_m = x - batch_m
+
+        # 將減去 margin 的 logit 放回原本的張量中
+        output = torch.where(index, x_m, x)
+
+        # 套用縮放與權重，並計算 CrossEntropy
+        return F.cross_entropy(self.s * output, target, weight=self.weight)
+
 
 def get_cb_weights(labels_list, num_classes=100, beta=0.999):
     class_counts = np.bincount(labels_list, minlength=num_classes)
