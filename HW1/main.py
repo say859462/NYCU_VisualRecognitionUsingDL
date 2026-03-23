@@ -40,14 +40,23 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(448, scale=(0.3, 1.0)),
+        # 1. 基礎幾何與姿態擾動
+        transforms.RandomResizedCrop(448, scale=(0.4, 1.0)),
         transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.1, contrast=0.1),
-        transforms.RandomRotation(15),
+        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
+        
+        # ⭐ 2. 形狀強制學習：隨機灰階化 (20% 機率切斷色彩捷徑)
+        transforms.RandomGrayscale(p=0.2),
+        
+        # ⭐ 3. 色彩信任度降低：放寬色相波動 (hue=0.1)
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
+        
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
-                             0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        
+        # 4. 次要特徵逼迫：隨機擦除 (模擬遮擋)
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.15), value='random')
     ])
 
     val_transform = transforms.Compose([
@@ -118,39 +127,30 @@ def main():
     history = {'train_loss': [], 'val_loss': [],
                'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
-
-    STAGE_1B_START = 15  # 進入 Epoch 16
-    CRT_START_EPOCH = 30  # 進入 Epoch 31
+    STAGE_2_START = 25  # 建議從 Epoch 26 開始進入度量收斂期
     criterion_curricular = CurricularFace(s=30.0, m=0.5).to(device)
-    # ⭐ 補回 Checkpoint 讀取邏輯
-    # ⭐ 修正後的 Checkpoint 讀取邏輯
+
+    # ================= 斷點續傳 (Resume) 修正 =================
     if RESUME_TRAINING and os.path.exists(CHECKPOINT_PATH):
-        checkpoint = torch.load(
-            CHECKPOINT_PATH, map_location=device, weights_only=False)
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
-
         start_epoch = checkpoint['epoch'] + 1
+        
         if 'criterion_curricular_state_dict' in checkpoint:
-            criterion_curricular.load_state_dict(
-                checkpoint['criterion_curricular_state_dict'])
-        print(
-            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
-        if start_epoch > CRT_START_EPOCH:
-            print(f"🚀 Detected Resume during Stage 2 (cRT). Re-configuring optimizer...")
-            model.freeze_features_for_crt()  # 先凍結特徵
+            criterion_curricular.load_state_dict(checkpoint['criterion_curricular_state_dict'])
 
-            # ⭐ 修正：必須與 Line 161 的設定完全一致，否則參數群組對不起來
-            head_params, transformer_params = model.get_classifier_parameters()
+        if start_epoch > STAGE_2_START:
+            print(f"🚀 Detected Resume during Stage 2. Re-configuring optimizer...")
+            # ⭐ 讀取兩組參數，重新配置差分學習率
+            head_params, base_params = model.get_finetune_parameters()
             optimizer = optim.AdamW([
-                {'params': head_params, 'lr': 1e-4},
-                {'params': transformer_params, 'lr': 1e-5}  # 極小學習率微調
+                {'params': head_params, 'lr': 1e-4},    # 分類頭維持正常速率
+                {'params': base_params, 'lr': 1e-5}     # Backbone 極微幅調整
             ], weight_decay=1e-4)
 
-            # cRT 階段使用的 scheduler
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=NUM_EPOCHS-CRT_START_EPOCH, eta_min=1e-6)
+                optimizer, T_max=NUM_EPOCHS-STAGE_2_START, eta_min=1e-6)
 
-        # 現在參數群組數量一致了，可以安全載入
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -169,50 +169,32 @@ def main():
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
-            if epoch < STAGE_1B_START:
-                # 🥇 Stage 1A: 基礎建設
-                model.dropblock.drop_prob = 0.0  # 確保關閉
+            if epoch < STAGE_2_START:
+                # 🥇 Stage 1: 特徵挖掘期 (強迫觀察各個部位)
                 criterions = {
                     'ce': nn.CrossEntropyLoss(label_smoothing=0.1).to(device),
                     'supcon': criterion_supcon, 'use_supcon': True,
-                    'do_saliency_cutmix': False,
-                    'pmg_weights': (1.5, 1.0, 0.5)
-                }
-            elif epoch < CRT_START_EPOCH:
-                # 🥈 Stage 1B: 全局鍛鍊 (CutMix ON, DropBlock 必須 OFF 避免衝突)
-                model.dropblock.drop_prob = 0.0  # ⭐ 解決衝突：徹底關閉 DropBlock
-                criterions = {
-                    'ce': nn.CrossEntropyLoss(label_smoothing=0.1).to(device),
-                    'supcon': None, 'use_supcon': False,
-                    'do_saliency_cutmix': True,  # 依賴 Transformer 提供穩定的注意力圖
-                    'pmg_weights': (0.5, 1.0, 1.5)
+                    'do_attn_crop_drop': True,  # ⭐ 啟動 Attention 增強
+                    'pmg_weights': (1.0, 1.0, 1.0) # 均勻發展
                 }
             else:
-                # 🥉 Stage 2: 度量純化
-                model.dropblock.drop_prob = 0.0
-                if epoch == CRT_START_EPOCH:
-                    print("\n🚀 [GEAR SHIFT] 啟動微調版 cRT + CurricularFace！")
-                    model.freeze_features_for_crt()
-
-                    # ⭐ 取得兩組參數
-                    head_params, transformer_params = model.get_classifier_parameters()
-
-                    # ⭐ 差分學習率：分類頭正常訓練，Transformer 極微幅調整
+                # 🥈 Stage 2: 度量收斂期 (全網路微調)
+                if epoch == STAGE_2_START:
+                    print("\n🚀 [GEAR SHIFT] 啟動 End-to-End CurricularFace！")
+                    head_params, base_params = model.get_finetune_parameters()
                     optimizer = optim.AdamW([
-                        {'params': head_params, 'lr': 1e-4},
-                        {'params': transformer_params, 'lr': 1e-5}  # 僅用 1/10 的學習率
+                        {'params': head_params, 'lr': 1e-4},    
+                        {'params': base_params, 'lr': 1e-5}     # 解凍 Backbone，給予小學習率
                     ], weight_decay=1e-4)
-
                     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer, T_max=NUM_EPOCHS-CRT_START_EPOCH, eta_min=1e-6)
+                        optimizer, T_max=NUM_EPOCHS-STAGE_2_START, eta_min=1e-6)
 
                 criterions = {
-                    'ce': criterion_curricular,  # ⭐ 直接使用全域的實例
+                    'ce': criterion_curricular,
                     'supcon': None, 'use_supcon': False,
-                    'do_saliency_cutmix': False,
+                    'do_attn_crop_drop': False, # ⭐ 關閉干擾，純化超球面邊界
                     'pmg_weights': (0.0, 0.0, 1.0)
                 }
-
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterions, epoch+1, optimizer, device, scaler)
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(

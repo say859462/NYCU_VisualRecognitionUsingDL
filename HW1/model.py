@@ -248,22 +248,27 @@ class ImageClassificationModel(nn.Module):
         self.train(is_training) 
         return saliency
     
-    def freeze_features_for_crt(self):
-        """凍結 Backbone，但保留 Transformer、Embedding 與分類頭解凍"""
+    # 替換掉原本的 freeze_features_for_crt 與 get_classifier_parameters
+    def get_finetune_parameters(self):
+        """
+        回傳兩組參數以供差分學習率 (Differential LR) 使用：
+        1. head_params: 分類頭 (CosineLinear) 與 Embedding 層
+        2. base_params: 解凍的 Backbone (ResNet layer2~4, SKConv, Transformer)
+        """
+        head_names = ['emb_l3', 'cls_l3', 'emb_l4', 'cls_l4', 'emb_fused', 'cls_fused']
+        head_params = []
+        base_params = []
+        
         for name, param in self.named_parameters():
-            # ⭐ 允許 transformer 也保持解凍
-            if not any(x in name for x in ['emb_', 'cls_', 'transformer']):
-                param.requires_grad = False
+            if not param.requires_grad:
+                continue  # 跳過固定不動的 stem 與 layer1
+                
+            if any(x in name for x in head_names):
+                head_params.append(param)
             else:
-                param.requires_grad = True
-
-    def get_classifier_parameters(self):
-        # ⭐ 將 Transformer 的參數分開回傳，以便在 main.py 設定不同的學習率
-        head_params = (list(self.emb_l3.parameters()) + list(self.cls_l3.parameters()) +
-                       list(self.emb_l4.parameters()) + list(self.cls_l4.parameters()) +
-                       list(self.emb_fused.parameters()) + list(self.cls_fused.parameters()))
-        transformer_params = list(self.transformer.parameters())
-        return head_params, transformer_params
+                base_params.append(param)
+                
+        return head_params, base_params
 
     def _init_weights(self):
         for m in self.modules():
