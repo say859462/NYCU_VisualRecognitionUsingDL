@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, get_cb_weights, SupConLoss, CurricularFace
+from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, SupConLoss, PKSampler
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -40,42 +40,61 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_transform = transforms.Compose([
-        # 1. 基礎幾何與姿態擾動
-        transforms.RandomResizedCrop(448, scale=(0.4, 1.0)),
+        transforms.RandomResizedCrop(512, scale=(0.55, 1.0)),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
-        
-        # ⭐ 2. 形狀強制學習：隨機灰階化 (20% 機率切斷色彩捷徑)
-        transforms.RandomGrayscale(p=0.2),
-        
-        # ⭐ 3. 色彩信任度降低：放寬色相波動 (hue=0.1)
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
-        
+        transforms.RandomAffine(
+            degrees=10,
+            translate=(0.05, 0.05),
+            scale=(0.95, 1.05),
+            shear=5
+        ),
+        transforms.ColorJitter(
+            brightness=0.12,
+            contrast=0.12,
+            saturation=0.08,
+            hue=0.02  # 或直接 0.0
+        ),
+        transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=0.3),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        
-        # 4. 次要特徵逼迫：隨機擦除 (模擬遮擋)
-        transforms.RandomErasing(p=0.3, scale=(0.02, 0.15), value='random')
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize(500),
-        transforms.CenterCrop(448),
+        transforms.Resize(576),
+        transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[
                              0.229, 0.224, 0.225])
     ])
-
     train_dataset = ImageDataset(
         root_dir=DATA_DIR, split="train", transform=train_transform)
     val_dataset = ImageDataset(
         root_dir=DATA_DIR, split="val", transform=val_transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE,
-                              shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True)
+    K = 4
+    P = BATCH_SIZE // K
+    num_workers = 8
+
+    train_loader_pk = DataLoader(
+        train_dataset,
+        batch_sampler=PKSampler(train_dataset.targets, p=P, k=K),
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True
+    )
+    train_loader_shuffle = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True
+    )
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
-                            num_workers=8, pin_memory=True, persistent_workers=True)
+                            num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
     model = ImageClassificationModel(
         num_classes=NUM_CLASSES, pretrained=True).to(device)
@@ -98,10 +117,9 @@ def main():
         {'params': head_params, 'lr': LR_BASE * 1.5},
     ], weight_decay=3e-4)
 
-    cb_weights = get_cb_weights(
-        train_dataset.targets, num_classes=NUM_CLASSES).to(device)
     criterion_supcon = SupConLoss(temperature=0.07).to(device)
     criterion_val = nn.CrossEntropyLoss().to(device)
+    criterion_train = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
 
     class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-5, last_epoch=-1):
@@ -127,29 +145,17 @@ def main():
     history = {'train_loss': [], 'val_loss': [],
                'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
-    STAGE_2_START = 25  # 建議從 Epoch 26 開始進入度量收斂期
-    criterion_curricular = CurricularFace(s=30.0, m=0.5).to(device)
+    
+    pk_phase_epochs = 8
+    
+    supcon_weight = config.get('supcon_weight', 0.15)
 
     # ================= 斷點續傳 (Resume) 修正 =================
     if RESUME_TRAINING and os.path.exists(CHECKPOINT_PATH):
-        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+        checkpoint = torch.load(
+            CHECKPOINT_PATH, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
-        
-        if 'criterion_curricular_state_dict' in checkpoint:
-            criterion_curricular.load_state_dict(checkpoint['criterion_curricular_state_dict'])
-
-        if start_epoch > STAGE_2_START:
-            print(f"🚀 Detected Resume during Stage 2. Re-configuring optimizer...")
-            # ⭐ 讀取兩組參數，重新配置差分學習率
-            head_params, base_params = model.get_finetune_parameters()
-            optimizer = optim.AdamW([
-                {'params': head_params, 'lr': 1e-4},    # 分類頭維持正常速率
-                {'params': base_params, 'lr': 1e-5}     # Backbone 極微幅調整
-            ], weight_decay=1e-4)
-
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=NUM_EPOCHS-STAGE_2_START, eta_min=1e-6)
 
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
@@ -168,33 +174,22 @@ def main():
     try:
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
+            use_pk_sampler = epoch < pk_phase_epochs
+            train_loader = train_loader_pk if use_pk_sampler else train_loader_shuffle
+            criterions = {
+                'ce': criterion_train,
+                'supcon': criterion_supcon,
+                'use_supcon': use_pk_sampler,
+                'supcon_weight': supcon_weight if use_pk_sampler else 0.0,
+                'pmg_weights': (1.0, 1.0, 1.0)
+            }
 
-            if epoch < STAGE_2_START:
-                # 🥇 Stage 1: 特徵挖掘期 (強迫觀察各個部位)
-                criterions = {
-                    'ce': nn.CrossEntropyLoss(label_smoothing=0.1).to(device),
-                    'supcon': criterion_supcon, 'use_supcon': True,
-                    'do_attn_crop_drop': True,  # ⭐ 啟動 Attention 增強
-                    'pmg_weights': (1.0, 1.0, 1.0) # 均勻發展
-                }
+            if use_pk_sampler:
+                print(
+                    f"Phase: PKSampler + CE + SupCon ({supcon_weight:.2f})")
             else:
-                # 🥈 Stage 2: 度量收斂期 (全網路微調)
-                if epoch == STAGE_2_START:
-                    print("\n🚀 [GEAR SHIFT] 啟動 End-to-End CurricularFace！")
-                    head_params, base_params = model.get_finetune_parameters()
-                    optimizer = optim.AdamW([
-                        {'params': head_params, 'lr': 1e-4},    
-                        {'params': base_params, 'lr': 1e-5}     # 解凍 Backbone，給予小學習率
-                    ], weight_decay=1e-4)
-                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                        optimizer, T_max=NUM_EPOCHS-STAGE_2_START, eta_min=1e-6)
+                print("Phase: Shuffle + CE")
 
-                criterions = {
-                    'ce': criterion_curricular,
-                    'supcon': None, 'use_supcon': False,
-                    'do_attn_crop_drop': False, # ⭐ 關閉干擾，純化超球面邊界
-                    'pmg_weights': (0.0, 0.0, 1.0)
-                }
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterions, epoch+1, optimizer, device, scaler)
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
@@ -231,8 +226,7 @@ def main():
                 'history': history,
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,
-                'best_val_labels': best_val_labels,
-                'criterion_curricular_state_dict': criterion_curricular.state_dict()
+                'best_val_labels': best_val_labels
             }, CHECKPOINT_PATH)
 
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:

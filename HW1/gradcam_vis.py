@@ -33,7 +33,7 @@ def main():
     # ⭐ 刪除 cam = GradCAM(...) 的宣告，我們不需要它了
 
     preprocess_geo = transforms.Compose(
-        [transforms.Resize(500), transforms.CenterCrop(448)])
+        [transforms.Resize(576), transforms.CenterCrop(512)])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(), transforms.Normalize(
             [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -73,7 +73,7 @@ def main():
                 # 將 14x14 放大對齊回 448x448 的原圖尺寸
                 raw_saliency = raw_saliency.unsqueeze(1)  # [1, 1, 14, 14]
                 upsampled_saliency = F.interpolate(
-                    raw_saliency, size=(448, 448), mode='bilinear', align_corners=False
+                    raw_saliency, size=(512, 512), mode='bilinear', align_corners=False
                 )
 
             # 轉換為 Numpy 並進行 Min-Max 正規化至 0~1

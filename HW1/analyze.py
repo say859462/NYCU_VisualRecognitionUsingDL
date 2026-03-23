@@ -24,8 +24,8 @@ def main():
 
     # 確保解析度對齊 Exp 14
     val_transform = transforms.Compose([
-        transforms.Resize(500),
-        transforms.CenterCrop(448),
+        transforms.Resize(576),
+        transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])

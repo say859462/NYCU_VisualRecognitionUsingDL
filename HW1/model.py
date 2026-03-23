@@ -39,7 +39,7 @@ class SimpleTransformer(nn.Module):
 
     def __init__(self, dim=512, num_heads=8, feat_size=14):
         super(SimpleTransformer, self).__init__()
-        # 加入可學習的絕對位置編碼 (假設輸入圖片 448x448，Layer4 輸出通常為 14x14)
+        
         self.pos_embed = nn.Parameter(torch.randn(
             1, feat_size * feat_size, dim) * 0.02)
 
@@ -171,7 +171,7 @@ class ImageClassificationModel(nn.Module):
 
         # ⭐ 新架構：Transformer + Attention Pooling
         self.transformer = SimpleTransformer(
-            dim=512, num_heads=8, feat_size=14)
+            dim=512, num_heads=8, feat_size=16)
         self.attn_pool3 = AttentionPooling(in_dim=512)
         self.attn_pool4 = AttentionPooling(in_dim=512)
         self.attn_pool_fused = AttentionPooling(in_dim=512)
@@ -281,5 +281,5 @@ class ImageClassificationModel(nn.Module):
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
         print(
-            f"📊 ResNet152-Transformer-AttnPool (Exp 49) Params: {total/1e6:.2f}M")
+            f"📊 ResNet152-Transformer-AttnPool  Params: {total/1e6:.2f}M")
         return total < 100_000_000

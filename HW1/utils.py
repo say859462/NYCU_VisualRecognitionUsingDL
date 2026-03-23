@@ -7,46 +7,58 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
 import torchvision.transforms.functional as TF
-import math
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch.utils.data.sampler import Sampler
+from collections import defaultdict
+import copy
 
-class CurricularFace(nn.Module):
-    """CurricularFace: 動態 Margin 策略，解決初期梯度崩潰與長尾困難樣本問題"""
-    def __init__(self, s=30.0, m=0.5):
-        super(CurricularFace, self).__init__()
-        self.s = s
-        self.m = m
-        self.cos_m = math.cos(m)
-        self.sin_m = math.sin(m)
-        self.threshold = math.cos(math.pi - m)
-        self.mm = math.sin(math.pi - m) * m
-        self.register_buffer('t', torch.zeros(1))
+class PKSampler(Sampler):
+    """
+    Class-Aware Sampler (PK Sampler)
+    確保每個 Batch 中包含 P 個類別，每個類別有 K 張圖片。
+    這是讓 SupConLoss 發揮效用的絕對關鍵！
+    """
+    def __init__(self, labels, p, k):
+        self.labels = labels
+        self.p = p
+        self.k = k
+        self.batch_size = p * k
+        self.label_to_indices = defaultdict(list)
+        for i, label in enumerate(labels):
+            self.label_to_indices[label].append(i)
+        self.classes = list(self.label_to_indices.keys())
 
-    def forward(self, cosine, label):
-        cosine = cosine.float()
-        cosine = torch.clamp(cosine, -1.0 + 1e-5, 1.0 - 1e-5)
-        sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
-        
-        phi = cosine * self.cos_m - sine * self.sin_m
-        phi = torch.where(cosine > self.threshold, phi, cosine - self.mm)
+    def __iter__(self):
+        label_to_indices = copy.deepcopy(self.label_to_indices)
+        for label in self.classes:
+            np.random.shuffle(label_to_indices[label])
 
-        one_hot = torch.zeros_like(cosine)
-        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+        classes = copy.deepcopy(self.classes)
+        np.random.shuffle(classes)
 
-        with torch.no_grad():
-            alpha = 0.99
-            pos_cos = torch.masked_select(cosine, one_hot.bool())
-            pos_mean = torch.mean(pos_cos) if pos_cos.numel() > 0 else self.t
-            self.t = alpha * self.t + (1 - alpha) * pos_mean
+        num_batches = len(self.labels) // self.batch_size
 
-        # 針對大於 t 的負樣本施加動態懲罰
-        neg_cosine = torch.where(cosine > self.t, cosine * (self.t + cosine), cosine)
-        
-        output = (one_hot * phi) + ((1.0 - one_hot) * neg_cosine)
-        return F.cross_entropy(output * self.s, label)
+        for _ in range(num_batches):
+            if len(classes) < self.p:
+                classes = copy.deepcopy(self.classes)
+                np.random.shuffle(classes)
+
+            sampled_classes = classes[:self.p]
+            classes = classes[self.p:]
+
+            batch = []
+            for c in sampled_classes:
+                if len(label_to_indices[c]) >= self.k:
+                    indices = label_to_indices[c][:self.k]
+                    label_to_indices[c] = label_to_indices[c][self.k:]
+                else:
+                    # 如果該類別圖片不夠，則放回抽樣 (Sample with replacement)
+                    indices = np.random.choice(self.label_to_indices[c], self.k, replace=True).tolist()
+                batch.extend(indices)
+            yield batch
+
+    def __len__(self):
+        return len(self.labels) // self.batch_size
+
 class SupConLoss(nn.Module):
     """
     Supervised Contrastive Learning Loss (單視角批次內版本)
