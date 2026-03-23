@@ -9,9 +9,11 @@ from dataset import ImageDataset
 from model import ImageClassificationModel
 from utils import plot_class_distribution, plot_per_class_error, plot_correlation_analysis, plot_long_tail_accuracy
 
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth')
+    parser.add_argument('--model_path', type=str,
+                        default='./Model_Weight/best_model.pth')
     parser.add_argument('--config_name', type=str, default='14th')
     args = parser.parse_args()
 
@@ -22,16 +24,19 @@ def main():
 
     # 確保解析度對齊 Exp 14
     val_transform = transforms.Compose([
-        transforms.Resize(500), 
+        transforms.Resize(500),
         transforms.CenterCrop(448),
-        transforms.ToTensor(), 
+        transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    val_dataset = ImageDataset(root_dir="./Dataset/data", split="val", transform=val_transform)
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=4)
+    val_dataset = ImageDataset(
+        root_dir="./Dataset/data", split="val", transform=val_transform)
+    val_loader = DataLoader(val_dataset, batch_size=16,
+                            shuffle=False, num_workers=4)
 
-    model = ImageClassificationModel(num_classes=100, pretrained=False).to(device)
+    model = ImageClassificationModel(
+        num_classes=100, pretrained=False).to(device)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
@@ -44,12 +49,12 @@ def main():
             images, labels = images.to(device), labels.to(device)
 
             # 單次推論，無溫度縮放
-            logits = model(images)
+            logits = model(images) * 30.0
             probs = torch.softmax(logits, dim=1)
 
             loss = criterion(logits, labels)
             running_loss += loss.item() * images.size(0)
-            
+
             _, preds = torch.max(probs, 1)
             correct_preds += torch.sum(preds == labels.data).item()
             total_preds += images.size(0)
@@ -57,14 +62,21 @@ def main():
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    print(f"\n✅ Val Loss: {running_loss/total_preds:.4f} | Val Acc: {(correct_preds/total_preds)*100:.2f}%")
+    print(
+        f"\n✅ Val Loss: {running_loss/total_preds:.4f} | Val Acc: {(correct_preds/total_preds)*100:.2f}%")
 
     # 繪圖分析
-    train_labels = ImageDataset(root_dir="./Dataset/data", split="train", transform=None).targets
-    train_counts = plot_class_distribution(data_dir="./Dataset/data/train", output_path=PLOT_SAVE_DIR)
-    error_rates = plot_per_class_error(all_preds, all_labels, save_path=os.path.join(PLOT_SAVE_DIR, "per_class_error.png"))
-    plot_long_tail_accuracy(train_labels, all_preds, all_labels, save_path=os.path.join(PLOT_SAVE_DIR, "long_tail.png"))
-    plot_correlation_analysis(train_counts, error_rates, output_path=os.path.join(PLOT_SAVE_DIR, "correlation.png"))
+    train_labels = ImageDataset(
+        root_dir="./Dataset/data", split="train", transform=None).targets
+    train_counts = plot_class_distribution(
+        data_dir="./Dataset/data/train", output_path=PLOT_SAVE_DIR)
+    error_rates = plot_per_class_error(all_preds, all_labels, save_path=os.path.join(
+        PLOT_SAVE_DIR, "per_class_error.png"))
+    plot_long_tail_accuracy(train_labels, all_preds, all_labels,
+                            save_path=os.path.join(PLOT_SAVE_DIR, "long_tail.png"))
+    plot_correlation_analysis(train_counts, error_rates, output_path=os.path.join(
+        PLOT_SAVE_DIR, "correlation.png"))
+
 
 if __name__ == "__main__":
     main()

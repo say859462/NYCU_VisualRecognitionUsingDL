@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
 
+
 def validate_one_epoch(model, val_loader, criterion, device):
     model.eval()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
@@ -13,9 +14,12 @@ def validate_one_epoch(model, val_loader, criterion, device):
 
             # ⭐ 直接取用 Logits
             outputs = model(images)
-            loss = criterion(outputs, labels)
+            scaled_outputs = outputs * 30.0
+            loss = criterion(scaled_outputs, labels)
 
             running_loss += loss.item() * images.size(0)
+
+            # 預測類別直接取 Cosine 最大值即可 (因為數值單調遞增)
             _, preds = torch.max(outputs, 1)
 
             correct_preds += torch.sum(preds == labels.data).item()

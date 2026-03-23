@@ -2,21 +2,100 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+import math
 
 
-class GeM(nn.Module):
-    def __init__(self, p=3.0, eps=1e-6):
-        super(GeM, self).__init__()
-        self.p = nn.Parameter(torch.ones(1) * p)
-        self.eps = eps
+class CosineLinear(nn.Module):
+    """Cosine Classifier: 將內積空間轉換為餘弦空間，配合度量學習 Loss 使用"""
+
+    def __init__(self, in_features, out_features):
+        super(CosineLinear, self).__init__()
+        self.weight = nn.Parameter(
+            torch.FloatTensor(out_features, in_features))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
     def forward(self, x):
-        return F.avg_pool2d(x.clamp(min=self.eps).pow(self.p), (x.size(-2), x.size(-1))).pow(1./self.p)
+        x_norm = F.normalize(x, p=2, dim=1)
+        w_norm = F.normalize(self.weight, p=2, dim=1)
+        return F.linear(x_norm, w_norm)
+
+
+class AttentionPooling(nn.Module):
+    """線性特徵聚合：保留空間重要性，輸出高斯分佈特徵，完美契合超球面"""
+
+    def __init__(self, in_dim=512):
+        super(AttentionPooling, self).__init__()
+        self.attn_conv = nn.Conv2d(in_dim, 1, kernel_size=1)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        attn = self.attn_conv(x)  # [B, 1, H, W]
+        attn = F.softmax(attn.view(B, -1), dim=1).view(B, 1, H, W)
+        return (x * attn).sum(dim=[2, 3])  # [B, C]
+
+
+class SimpleTransformer(nn.Module):
+    """Transformer Block：支援 2D Positional Encoding，保留完整 512D 空間"""
+
+    def __init__(self, dim=512, num_heads=8, feat_size=14):
+        super(SimpleTransformer, self).__init__()
+        # 加入可學習的絕對位置編碼 (假設輸入圖片 448x448，Layer4 輸出通常為 14x14)
+        self.pos_embed = nn.Parameter(torch.randn(
+            1, feat_size * feat_size, dim) * 0.02)
+
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim, num_heads=num_heads, batch_first=True)
+        self.norm1 = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(dim * 4, dim)
+        )
+        self.norm2 = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x_flat = x.flatten(2).permute(0, 2, 1)  # [B, H*W, C]
+
+        # 動態適應不同解析度 (若推理時輸入大小改變，進行雙線性插值)
+        if x_flat.shape[1] != self.pos_embed.shape[1]:
+            pos_embed_rescaled = F.interpolate(
+                self.pos_embed.permute(0, 2, 1).view(
+                    1, C, int(math.sqrt(self.pos_embed.shape[1])), -1),
+                size=(H, W), mode='bilinear', align_corners=False
+            ).flatten(2).permute(0, 2, 1)
+            x_flat = x_flat + pos_embed_rescaled
+        else:
+            x_flat = x_flat + self.pos_embed
+
+        attn_out, _ = self.attn(x_flat, x_flat, x_flat)
+        x_flat = self.norm1(x_flat + attn_out)
+
+        ffn_out = self.ffn(x_flat)
+        x_flat = self.norm2(x_flat + ffn_out)
+
+        x_out = x_flat.permute(0, 2, 1).view(B, C, H, W)
+        return x + x_out  # Residual connection
+
+    # 替換 model.py 內的這兩個函數
+    def freeze_features_for_crt(self):
+        """凍結 Backbone 與 Transformer，但保留 Embedding 層與分類頭解凍"""
+        for name, param in self.named_parameters():
+            # 只要不是 embedding 層 (emb_l3, emb_l4, emb_fused) 或分類頭 (cls_)，就凍結
+            if not any(x in name for x in ['emb_', 'cls_']):
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+
+    def get_classifier_parameters(self):
+        # 讓優化器同時接管 Embedding 層與分類頭
+        return (list(self.emb_l3.parameters()) + list(self.cls_l3.parameters()) +
+                list(self.emb_l4.parameters()) + list(self.cls_l4.parameters()) +
+                list(self.emb_fused.parameters()) + list(self.cls_fused.parameters()))
 
 
 class SKConv(nn.Module):
-    """Selective Kernel Convolution: 動態變焦，自動決定感受野大小"""
-
     def __init__(self, features, reduction=16):
         super(SKConv, self).__init__()
         self.conv1 = nn.Conv2d(features, features, 3, padding=1, bias=False)
@@ -42,8 +121,6 @@ class SKConv(nn.Module):
 
 
 class DropBlock2D(nn.Module):
-    """DropBlock: 強制擴展注意力視野，防止熱力圖坍塌在局部特徵"""
-
     def __init__(self, drop_prob=0.15, block_size=5):
         super(DropBlock2D, self).__init__()
         self.drop_prob = drop_prob
@@ -52,7 +129,8 @@ class DropBlock2D(nn.Module):
     def forward(self, x):
         if not self.training or self.drop_prob == 0.:
             return x
-        gamma = self.drop_prob / (self.block_size ** 2) * \
+        gamma = self.drop_prob / \
+            (self.block_size ** 2) * \
             (x.shape[-1] ** 2) / ((x.shape[-1] - self.block_size + 1) ** 2)
         mask = (torch.rand(x.shape[0], *x.shape[2:],
                 device=x.device) < gamma).float()
@@ -60,50 +138,6 @@ class DropBlock2D(nn.Module):
                             padding=self.block_size // 2)
         mask = 1. - mask
         return x * mask.unsqueeze(1) * (mask.numel() / mask.sum())
-
-
-class CompactBilinearPooling(nn.Module):
-    """CBP: 捕捉斑紋與輪廓同時出現的二階統計特徵 (透過 Count Sketch 加速)"""
-
-    def __init__(self, input_dim=512, output_dim=1024):
-        super(CompactBilinearPooling, self).__init__()
-        self.output_dim = output_dim
-        # 預先生成隨機投影矩陣 (Count Sketch)
-        self.register_buffer(
-            'sketch1', self.generate_sketch_matrix(input_dim, output_dim))
-        self.register_buffer(
-            'sketch2', self.generate_sketch_matrix(input_dim, output_dim))
-
-    def generate_sketch_matrix(self, input_dim, output_dim):
-        rand_h = torch.randint(0, output_dim, (input_dim,))
-        rand_s = torch.randint(0, 2, (input_dim,)).float() * 2 - 1
-        sketch = torch.zeros(output_dim, input_dim)
-        sketch[rand_h, torch.arange(input_dim)] = rand_s
-        return sketch
-
-    def forward(self, x1, x2):
-        B, C, H, W = x1.shape
-        x1_flat = x1.view(B, C, -1).permute(0, 2, 1)  # [B, HW, C]
-        x2_flat = x2.view(B, C, -1).permute(0, 2, 1)
-
-        proj1 = F.linear(x1_flat, self.sketch1)  # [B, HW, out_dim]
-        proj2 = F.linear(x2_flat, self.sketch2)
-
-        # ⭐ 核心修正：FFT 不支援 BFloat16，在此暫時轉為 float32
-        orig_dtype = proj1.dtype
-        proj1_f32 = proj1.to(torch.float32)
-        proj2_f32 = proj2.to(torch.float32)
-
-        # 透過 FFT 計算卷積等效於外積的 Count Sketch
-        fft1 = torch.fft.fft(proj1_f32)
-        fft2 = torch.fft.fft(proj2_f32)
-
-        # 算完 IFFT 後，再轉回原本的 dtype (bfloat16) 以無縫銜接後續網路
-        cbp_flat = torch.fft.ifft(fft1 * fft2).real.to(orig_dtype)
-
-        # 將二階特徵還原為 2D 空間形狀，供 Grad-CAM 或 GeM 使用
-        cbp_spatial = cbp_flat.permute(0, 2, 1).view(B, self.output_dim, H, W)
-        return cbp_spatial
 
 
 class ImageClassificationModel(nn.Module):
@@ -132,26 +166,27 @@ class ImageClassificationModel(nn.Module):
         self.sk3 = SKConv(512)
         self.sk4 = SKConv(512)
 
-        # ⭐ 加入 DropBlock 防止注意力坍塌
-        self.dropblock = DropBlock2D(drop_prob=0.15, block_size=5)
+        self.dropblock = DropBlock2D(
+            drop_prob=0.0, block_size=5)  # 預設關閉，由外部排程控制
 
-        # ⭐ 替換 AFF 為 CBP，升級二階特徵 (輸出 1024D)
-        self.cbp = CompactBilinearPooling(input_dim=512, output_dim=1024)
+        # ⭐ 新架構：Transformer + Attention Pooling
+        self.transformer = SimpleTransformer(
+            dim=512, num_heads=8, feat_size=14)
+        self.attn_pool3 = AttentionPooling(in_dim=512)
+        self.attn_pool4 = AttentionPooling(in_dim=512)
+        self.attn_pool_fused = AttentionPooling(in_dim=512)
 
-        self.gem = GeM(p=3.0)
-
-        self.emb_l3 = nn.Sequential(nn.Linear(512, 512), nn.BatchNorm1d(
+        self.emb_l3 = nn.Sequential(nn.BatchNorm1d(
             512), nn.PReLU(), nn.Dropout(p=0.4))
-        self.cls_l3 = nn.Linear(512, num_classes)
+        self.cls_l3 = CosineLinear(512, num_classes)
 
-        self.emb_l4 = nn.Sequential(nn.Linear(512, 512), nn.BatchNorm1d(
+        self.emb_l4 = nn.Sequential(nn.BatchNorm1d(
             512), nn.PReLU(), nn.Dropout(p=0.4))
-        self.cls_l4 = nn.Linear(512, num_classes)
+        self.cls_l4 = CosineLinear(512, num_classes)
 
-        # 融合層降維漏斗 (1024D -> 512D)
         self.emb_fused = nn.Sequential(
-            nn.Linear(1024, 512), nn.BatchNorm1d(512), nn.PReLU(), nn.Dropout(p=0.4))
-        self.cls_fused = nn.Linear(512, num_classes)
+            nn.BatchNorm1d(512), nn.PReLU(), nn.Dropout(p=0.4))
+        self.cls_fused = CosineLinear(512, num_classes)
 
         self._init_weights()
 
@@ -163,22 +198,20 @@ class ImageClassificationModel(nn.Module):
         f3_orig = self.layer3(x)
         f3_c = self.conv1x1_l3(f3_orig)
         f3_sk = self.sk3(f3_c)
-        f3_sk = self.dropblock(f3_sk)  # 實施特徵挖空
+        f3_sk = self.dropblock(f3_sk)
 
         f4_orig = self.layer4(f3_orig)
         f4_c = self.conv1x1_l4(f4_orig)
         f4_sk = self.sk4(f4_c)
         f4_sk = self.dropblock(f4_sk)
 
-        f4_up = F.interpolate(
-            f4_sk, size=f3_sk.shape[2:], mode='bilinear', align_corners=False)
+        # 全局關係感知
+        f_fused = self.transformer(f4_sk)
 
-        # ⭐ 二階外積融合
-        f_fused = self.cbp(f3_sk, f4_up)
-
-        p3 = self.gem(f3_sk).flatten(1)
-        p4 = self.gem(f4_sk).flatten(1)
-        p_fused = self.gem(f_fused).flatten(1)
+        # 線性特徵聚合
+        p3 = self.attn_pool3(f3_sk)
+        p4 = self.attn_pool4(f4_sk)
+        p_fused = self.attn_pool_fused(f_fused)
 
         e3 = self.emb_l3(p3)
         e4 = self.emb_l4(p4)
@@ -193,19 +226,44 @@ class ImageClassificationModel(nn.Module):
         else:
             return out_fused
 
-    # ⭐ 新增：cRT 解耦訓練專用介面
+    def get_saliency(self, x):
+        # ⭐ 紀錄進入函數前的模型模式 (True = 訓練中, False = 評估中)
+        is_training = self.training 
+        
+        self.eval()
+        with torch.no_grad():
+            x = self.stem(x)
+            x = self.layer1(x)
+            x = self.layer2(x)
+            f3 = self.layer3(x)
+            f4 = self.layer4(f3)
+            f4_c = self.conv1x1_l4(f4)
+            f4_sk = self.sk4(f4_c)
+            # 使用 Transformer 與 Attention Pooling 產生的精準權重圖作為導航
+            f_fused = self.transformer(f4_sk)
+            attn = self.attn_pool_fused.attn_conv(f_fused)  # [B, 1, H, W]
+            saliency = attn.squeeze(1)
+            
+        # ⭐ 恢復原本的模式，避免破壞推論 (eval) 狀態
+        self.train(is_training) 
+        return saliency
+    
     def freeze_features_for_crt(self):
-        """凍結所有特徵提取器，僅保留分類頭 (Classifier Heads) 可訓練"""
-        for param in self.parameters():
-            param.requires_grad = False
-
-        # 僅解凍最終的分類器
-        for head in [self.cls_l3, self.cls_l4, self.cls_fused]:
-            for param in head.parameters():
+        """凍結 Backbone，但保留 Transformer、Embedding 與分類頭解凍"""
+        for name, param in self.named_parameters():
+            # ⭐ 允許 transformer 也保持解凍
+            if not any(x in name for x in ['emb_', 'cls_', 'transformer']):
+                param.requires_grad = False
+            else:
                 param.requires_grad = True
 
     def get_classifier_parameters(self):
-        return list(self.cls_l3.parameters()) + list(self.cls_l4.parameters()) + list(self.cls_fused.parameters())
+        # ⭐ 將 Transformer 的參數分開回傳，以便在 main.py 設定不同的學習率
+        head_params = (list(self.emb_l3.parameters()) + list(self.cls_l3.parameters()) +
+                       list(self.emb_l4.parameters()) + list(self.cls_l4.parameters()) +
+                       list(self.emb_fused.parameters()) + list(self.cls_fused.parameters()))
+        transformer_params = list(self.transformer.parameters())
+        return head_params, transformer_params
 
     def _init_weights(self):
         for m in self.modules():
@@ -216,7 +274,7 @@ class ImageClassificationModel(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def check_parameters(self):
-        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
         print(
-            f"📊 ResNet152-CBP-DropBlock (Exp 47) Trainable Params: {total/1e6:.2f}M")
+            f"📊 ResNet152-Transformer-AttnPool (Exp 49) Params: {total/1e6:.2f}M")
         return total < 100_000_000

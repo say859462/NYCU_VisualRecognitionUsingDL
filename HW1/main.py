@@ -1,4 +1,4 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, get_cb_weights, SupConLoss
+from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, get_cb_weights, SupConLoss, CurricularFace
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
@@ -94,8 +94,6 @@ def main():
     criterion_supcon = SupConLoss(temperature=0.07).to(device)
     criterion_val = nn.CrossEntropyLoss().to(device)
 
-    CRT_START_EPOCH = int(NUM_EPOCHS * 0.5)
-
     class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-5, last_epoch=-1):
             self.warmup_epochs = warmup_epochs
@@ -121,15 +119,42 @@ def main():
                'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
+    STAGE_1B_START = 15  # 進入 Epoch 16
+    CRT_START_EPOCH = 30  # 進入 Epoch 31
+    criterion_curricular = CurricularFace(s=30.0, m=0.5).to(device)
     # ⭐ 補回 Checkpoint 讀取邏輯
+    # ⭐ 修正後的 Checkpoint 讀取邏輯
     if RESUME_TRAINING and os.path.exists(CHECKPOINT_PATH):
         checkpoint = torch.load(
             CHECKPOINT_PATH, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
+
+        start_epoch = checkpoint['epoch'] + 1
+        if 'criterion_curricular_state_dict' in checkpoint:
+            criterion_curricular.load_state_dict(
+                checkpoint['criterion_curricular_state_dict'])
+        print(
+            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+        if start_epoch > CRT_START_EPOCH:
+            print(f"🚀 Detected Resume during Stage 2 (cRT). Re-configuring optimizer...")
+            model.freeze_features_for_crt()  # 先凍結特徵
+
+            # ⭐ 修正：必須與 Line 161 的設定完全一致，否則參數群組對不起來
+            head_params, transformer_params = model.get_classifier_parameters()
+            optimizer = optim.AdamW([
+                {'params': head_params, 'lr': 1e-4},
+                {'params': transformer_params, 'lr': 1e-5}  # 極小學習率微調
+            ], weight_decay=1e-4)
+
+            # cRT 階段使用的 scheduler
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=NUM_EPOCHS-CRT_START_EPOCH, eta_min=1e-6)
+
+        # 現在參數群組數量一致了，可以安全載入
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
+
         best_val_acc = checkpoint['best_val_acc']
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         history = checkpoint['history']
@@ -144,29 +169,49 @@ def main():
         for epoch in range(start_epoch, NUM_EPOCHS):
             print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
 
-            if epoch == CRT_START_EPOCH:
-                print("\n🚀 [GEAR SHIFT] 啟動 cRT 解耦訓練！凍結特徵提取器，專注校正長尾分類器！")
-                model.freeze_features_for_crt()
-                # 重新初始化 Optimizer，僅更新分類器，學習率給予較保守的值
-                optimizer = optim.AdamW(
-                    model.get_classifier_parameters(), lr=1e-4, weight_decay=1e-4)
-                # 為最後 10 個 Epoch 重新建立退火排程
-                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer, T_max=NUM_EPOCHS - CRT_START_EPOCH, eta_min=1e-6)
-
-            if epoch < CRT_START_EPOCH:
-                # Stage 1: 建立純淨特徵，無權重 CE + 柔性 SupCon
-                criterion_ce = nn.CrossEntropyLoss(
-                    label_smoothing=0.1).to(device)
-                criterions = {'ce': criterion_ce,
-                              'supcon': criterion_supcon, 'use_supcon': True}
+            if epoch < STAGE_1B_START:
+                # 🥇 Stage 1A: 基礎建設
+                model.dropblock.drop_prob = 0.0  # 確保關閉
+                criterions = {
+                    'ce': nn.CrossEntropyLoss(label_smoothing=0.1).to(device),
+                    'supcon': criterion_supcon, 'use_supcon': True,
+                    'do_saliency_cutmix': False,
+                    'pmg_weights': (1.5, 1.0, 0.5)
+                }
+            elif epoch < CRT_START_EPOCH:
+                # 🥈 Stage 1B: 全局鍛鍊 (CutMix ON, DropBlock 必須 OFF 避免衝突)
+                model.dropblock.drop_prob = 0.0  # ⭐ 解決衝突：徹底關閉 DropBlock
+                criterions = {
+                    'ce': nn.CrossEntropyLoss(label_smoothing=0.1).to(device),
+                    'supcon': None, 'use_supcon': False,
+                    'do_saliency_cutmix': True,  # 依賴 Transformer 提供穩定的注意力圖
+                    'pmg_weights': (0.5, 1.0, 1.5)
+                }
             else:
-                # Stage 2 (cRT): 凍結特徵後，套用長尾權重 (取消 Label Smoothing 讓邊界更清晰)
-                # 特徵已凍結，SupCon 計算已無意義，可關閉
-                criterion_ce = nn.CrossEntropyLoss(
-                    weight=cb_weights, label_smoothing=0.0).to(device)
-                criterions = {'ce': criterion_ce,
-                              'supcon': None, 'use_supcon': False}
+                # 🥉 Stage 2: 度量純化
+                model.dropblock.drop_prob = 0.0
+                if epoch == CRT_START_EPOCH:
+                    print("\n🚀 [GEAR SHIFT] 啟動微調版 cRT + CurricularFace！")
+                    model.freeze_features_for_crt()
+
+                    # ⭐ 取得兩組參數
+                    head_params, transformer_params = model.get_classifier_parameters()
+
+                    # ⭐ 差分學習率：分類頭正常訓練，Transformer 極微幅調整
+                    optimizer = optim.AdamW([
+                        {'params': head_params, 'lr': 1e-4},
+                        {'params': transformer_params, 'lr': 1e-5}  # 僅用 1/10 的學習率
+                    ], weight_decay=1e-4)
+
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                        optimizer, T_max=NUM_EPOCHS-CRT_START_EPOCH, eta_min=1e-6)
+
+                criterions = {
+                    'ce': criterion_curricular,  # ⭐ 直接使用全域的實例
+                    'supcon': None, 'use_supcon': False,
+                    'do_saliency_cutmix': False,
+                    'pmg_weights': (0.0, 0.0, 1.0)
+                }
 
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, criterions, epoch+1, optimizer, device, scaler)
@@ -205,6 +250,7 @@ def main():
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,
                 'best_val_labels': best_val_labels,
+                'criterion_curricular_state_dict': criterion_curricular.state_dict()
             }, CHECKPOINT_PATH)
 
             if epochs_no_improve >= EARLY_STOPPING_PATIENCE:

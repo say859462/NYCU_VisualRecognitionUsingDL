@@ -13,11 +13,46 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class CurricularFace(nn.Module):
+    """CurricularFace: 動態 Margin 策略，解決初期梯度崩潰與長尾困難樣本問題"""
+    def __init__(self, s=30.0, m=0.5):
+        super(CurricularFace, self).__init__()
+        self.s = s
+        self.m = m
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        self.threshold = math.cos(math.pi - m)
+        self.mm = math.sin(math.pi - m) * m
+        self.register_buffer('t', torch.zeros(1))
+
+    def forward(self, cosine, label):
+        cosine = cosine.float()
+        cosine = torch.clamp(cosine, -1.0 + 1e-5, 1.0 - 1e-5)
+        sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
+        
+        phi = cosine * self.cos_m - sine * self.sin_m
+        phi = torch.where(cosine > self.threshold, phi, cosine - self.mm)
+
+        one_hot = torch.zeros_like(cosine)
+        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+
+        with torch.no_grad():
+            alpha = 0.99
+            pos_cos = torch.masked_select(cosine, one_hot.bool())
+            pos_mean = torch.mean(pos_cos) if pos_cos.numel() > 0 else self.t
+            self.t = alpha * self.t + (1 - alpha) * pos_mean
+
+        # 針對大於 t 的負樣本施加動態懲罰
+        neg_cosine = torch.where(cosine > self.t, cosine * (self.t + cosine), cosine)
+        
+        output = (one_hot * phi) + ((1.0 - one_hot) * neg_cosine)
+        return F.cross_entropy(output * self.s, label)
 class SupConLoss(nn.Module):
     """
     Supervised Contrastive Learning Loss (單視角批次內版本)
     專門解決極相似物種 (FGVC) 的特徵推擠，不設定硬性 Margin，而是透過溫度係數平滑拉開邊界。
     """
+
     def __init__(self, temperature=0.07):
         super(SupConLoss, self).__init__()
         self.temperature = temperature
@@ -26,17 +61,18 @@ class SupConLoss(nn.Module):
         # L2 正規化
         features = F.normalize(features, p=2, dim=1)
         batch_size = features.shape[0]
-        
+
         labels = labels.contiguous().view(-1, 1)
         mask = torch.eq(labels, labels.T).float().to(features.device)
-        
+
         # 計算特徵相似度點積矩陣
-        anchor_dot_contrast = torch.div(torch.matmul(features, features.T), self.temperature)
-        
+        anchor_dot_contrast = torch.div(torch.matmul(
+            features, features.T), self.temperature)
+
         # 數值穩定性處理
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
-        
+
         # 屏蔽對角線 (自己與自己的相似度不納入計算)
         logits_mask = torch.scatter(
             torch.ones_like(mask),
@@ -45,15 +81,18 @@ class SupConLoss(nn.Module):
             0
         )
         mask = mask * logits_mask
-        
+
         exp_logits = torch.exp(logits) * logits_mask
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-6)
-        
+
         mask_sum = mask.sum(1)
-        mask_sum = torch.where(mask_sum == 0, torch.ones_like(mask_sum), mask_sum)
+        mask_sum = torch.where(
+            mask_sum == 0, torch.ones_like(mask_sum), mask_sum)
         mean_log_prob_pos = (mask * log_prob).sum(1) / mask_sum
-        
+
         return - mean_log_prob_pos.mean()
+
+
 class ArcFaceLoss(nn.Module):
     def __init__(self, s=30.0, m=0.5, weight=None, label_smooth=0.05):
         """
@@ -75,7 +114,10 @@ class ArcFaceLoss(nn.Module):
 
     def forward(self, cosine, label):
         # 確保 cosine 在安全範圍內，避免 sqrt 產生 NaN
-        cosine = torch.clamp(cosine, -1.0 + 1e-7, 1.0 - 1e-7)
+        cosine = cosine.float()
+
+        # 確保 cosine 在安全範圍內，改用 1e-5 以確保絕對安全
+        cosine = torch.clamp(cosine, -1.0 + 1e-5, 1.0 - 1e-5)
         sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
 
         # cos(θ + m) = cosθ * cosm - sinθ * sinm

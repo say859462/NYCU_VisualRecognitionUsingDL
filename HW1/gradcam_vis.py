@@ -4,12 +4,12 @@ import random
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import torch.nn.functional as F  # ⭐ 新增
 from PIL import Image
 from torchvision import transforms
 from tqdm import tqdm
 from model import ImageClassificationModel
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.image import show_cam_on_image
+from pytorch_grad_cam.utils.image import show_cam_on_image # 僅保留疊圖工具
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/GradCAM_Outputs/46th')
+                        default='./Plot/Attention_Outputs/48th') # ⭐ 建議改名
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,7 +30,7 @@ def main():
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
-    cam = GradCAM(model=model, target_layers=[model.cbp])
+    # ⭐ 刪除 cam = GradCAM(...) 的宣告，我們不需要它了
 
     preprocess_geo = transforms.Compose(
         [transforms.Resize(500), transforms.CenterCrop(448)])
@@ -63,14 +63,25 @@ def main():
             rgb_img = np.float32(cropped_img) / 255.0
 
             with torch.no_grad():
-                logits = model(input_tensor)
-                # ⭐ 拔除溫度縮放
+                logits = model(input_tensor) * 30.0  
                 probs = torch.nn.functional.softmax(logits, dim=1)[0]
-
                 pred_class, pred_score = probs.argmax().item(), probs.max().item()
 
-            grayscale_cam = cam(input_tensor=input_tensor, targets=None)[0, :]
-            vis = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+                # ⭐ 核心突破：直接向模型索取真實的 Attention Map (通常為 14x14)
+                raw_saliency = model.get_saliency(input_tensor) 
+
+                # 將 14x14 放大對齊回 448x448 的原圖尺寸
+                raw_saliency = raw_saliency.unsqueeze(1) # [1, 1, 14, 14]
+                upsampled_saliency = F.interpolate(
+                    raw_saliency, size=(448, 448), mode='bilinear', align_corners=False
+                )
+                
+            # 轉換為 Numpy 並進行 Min-Max 正規化至 0~1
+            saliency_map = upsampled_saliency.squeeze().cpu().numpy()
+            saliency_map = (saliency_map - saliency_map.min()) / (saliency_map.max() - saliency_map.min() + 1e-8)
+
+            # 使用 GradCAM 的繪圖工具進行熱力圖疊加
+            vis = show_cam_on_image(rgb_img, saliency_map, use_rgb=True)
 
             fig, axes = plt.subplots(1, 2, figsize=(10, 5))
             color = 'green' if str(pred_class) == str(class_id) else 'red'
@@ -82,10 +93,10 @@ def main():
             axes[0].set_title("Original")
             axes[1].imshow(vis)
             axes[1].axis('off')
-            axes[1].set_title("ResNest Grad-CAM")
+            axes[1].set_title("Native Attention Pooling")
 
             plt.savefig(os.path.join(
-                class_save_dir, f"cam_{os.path.splitext(os.path.basename(img_path))[0]}.png"))
+                class_save_dir, f"attn_{os.path.splitext(os.path.basename(img_path))[0]}.png"))
             plt.close(fig)
 
 

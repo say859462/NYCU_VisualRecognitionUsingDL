@@ -10,10 +10,12 @@ from tqdm import tqdm
 from dataset import ImageDataset
 from model import ImageClassificationModel
 
+
 def main():
     parser = argparse.ArgumentParser(description="Final Inference")
     parser.add_argument('--config', type=str, default='./config.json')
-    parser.add_argument('--model_path', type=str, default='./Model_Weight/best_model.pth')
+    parser.add_argument('--model_path', type=str,
+                        default='./Model_Weight/best_model.pth')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -22,16 +24,19 @@ def main():
 
     # 確保解析度對齊 Exp 14
     test_transform = transforms.Compose([
-        transforms.Resize(500), 
+        transforms.Resize(500),
         transforms.CenterCrop(448),
-        transforms.ToTensor(), 
+        transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    test_dataset = ImageDataset(root_dir=config['data_dir'], split="test", transform=test_transform)
-    test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+    test_dataset = ImageDataset(
+        root_dir=config['data_dir'], split="test", transform=test_transform)
+    test_loader = DataLoader(
+        test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
 
-    model = ImageClassificationModel(num_classes=config['num_classes'], pretrained=False).to(device)
+    model = ImageClassificationModel(
+        num_classes=config['num_classes'], pretrained=False).to(device)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
@@ -41,18 +46,21 @@ def main():
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
-            
+
             # 單次推論，直接 Softmax 取機率
-            avg_probs = F.softmax(model(images), dim=1)
-            
+            avg_probs = F.softmax(model(images) * 30.0, dim=1)
+
             _, preds = torch.max(avg_probs, 1)
             all_predictions.extend(preds.cpu().numpy())
 
-    image_names = [os.path.splitext(os.path.basename(p))[0] for p in test_dataset.image_paths]
-    submission_df = pd.DataFrame({'image_name': image_names, 'pred_label': all_predictions})
+    image_names = [os.path.splitext(os.path.basename(p))[0]
+                   for p in test_dataset.image_paths]
+    submission_df = pd.DataFrame(
+        {'image_name': image_names, 'pred_label': all_predictions})
     submission_df.to_csv("prediction.csv", index=False)
-    
+
     print("\n🎉 Submission CSV saved!")
+
 
 if __name__ == "__main__":
     main()
