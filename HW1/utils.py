@@ -1,6 +1,7 @@
 import os
 import random
 import numpy as np
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -184,6 +185,20 @@ class LDAMLoss(nn.Module):
 
         # 套用縮放與權重，並計算 CrossEntropy
         return F.cross_entropy(self.s * output, target, weight=self.weight)
+
+
+class BalancedSoftmaxLoss(nn.Module):
+    def __init__(self, sample_per_class):
+        super().__init__()
+        sample_per_class = torch.as_tensor(sample_per_class, dtype=torch.float32)
+        self.register_buffer(
+            'log_prior',
+            torch.log(sample_per_class.clamp(min=1.0)).view(1, -1)
+        )
+
+    def forward(self, logits, targets):
+        balanced_logits = logits + self.log_prior.to(logits.device)
+        return F.cross_entropy(balanced_logits, targets)
 
 
 def get_cb_weights(labels_list, num_classes=100, beta=0.999):

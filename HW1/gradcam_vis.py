@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/Attention_Outputs/50th')  # ⭐ 建議改名
+                        default='./Plot/Attention_Outputs/52th')  # ⭐ 建議改名
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -63,15 +63,13 @@ def main():
             rgb_img = np.float32(cropped_img) / 255.0
 
             with torch.no_grad():
-                logits = model(input_tensor) * 30.0
+                logits = model(input_tensor)
                 probs = torch.nn.functional.softmax(logits, dim=1)[0]
                 pred_class, pred_score = probs.argmax().item(), probs.max().item()
 
-                # ⭐ 核心突破：直接向模型索取真實的 Attention Map (通常為 14x14)
                 raw_saliency = model.get_saliency(input_tensor)
 
-                # 將 14x14 放大對齊回 448x448 的原圖尺寸
-                raw_saliency = raw_saliency.unsqueeze(1)  # [1, 1, 14, 14]
+                raw_saliency = raw_saliency.unsqueeze(1)
                 upsampled_saliency = F.interpolate(
                     raw_saliency, size=(512, 512), mode='bilinear', align_corners=False
                 )

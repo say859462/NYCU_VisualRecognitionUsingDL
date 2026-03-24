@@ -17,8 +17,7 @@ from model import ImageClassificationModel
 
 def get_features_and_preds(model, dataloader, device):
     """
-    使用 PyTorch Hook 安全提取 512 維 Embedding 和預測結果
-    已適配 Exp 50 架構：直接攔截進入 cls_fused 前的高斯平滑特徵
+    使用 PyTorch Hook 安全提取 GeM 後的 fused embedding 和預測結果
     """
     model.eval()
     all_embeddings = []
@@ -30,23 +29,16 @@ def get_features_and_preds(model, dataloader, device):
 
     def get_activation(name):
         def hook(model, input, output):
-            # 分類器的 input 是一個 tuple，我們取第一個元素 [0]
-            # 這裡拿到的會是經過 emb_fused 處理後，準備進入 CosineLinear 的 512 維特徵
             activation[name] = input[0].detach()
         return hook
 
-    # ⭐ 綁定 Hook 到 Exp 50 的最終分類頭
-    handle = model.cls_fused.register_forward_hook(get_activation('embed'))
+    handle = model.classifier.register_forward_hook(get_activation('embed'))
 
     # 2. 執行推論
     with torch.no_grad():
         for images, labels in tqdm(dataloader, desc="Extracting Features", colour="cyan"):
             images = images.to(device)
-
-            # 在 eval 模式下，Exp 50 模型會直接回傳 out_fused
             outputs = model(images)
-
-            # 直接取 argmax 即可 (Cosine 空間中數值單調遞增，最大值即為預測結果)
             preds = torch.argmax(outputs, dim=1)
 
             all_embeddings.append(activation['embed'].cpu().numpy())
@@ -198,7 +190,7 @@ def main():
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # ⭐ 更新資料夾名稱，對齊當前實驗進度
-    OUTPUT_DIR = './Plot/EXP49_Diagnostic'
+    OUTPUT_DIR = './Plot/EXP52_Diagnostic'
 
     # 您可以根據先前的 error_dist.png 或是這次產出的 CSV 來替換這些 ID
     # 目前預設為之前表現較差的類別 ID
@@ -208,11 +200,11 @@ def main():
     print(f"Device: {DEVICE} | Output Dir: {OUTPUT_DIR}")
 
     # ==========================================
-    # 2. 資料準備 (⭐ 對齊 Exp 50 的幾何裁切尺寸)
+    # 2. 資料準備
     # ==========================================
     val_transform = transforms.Compose([
-        transforms.Resize(500),
-        transforms.CenterCrop(448),
+        transforms.Resize(576),
+        transforms.CenterCrop(512),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])

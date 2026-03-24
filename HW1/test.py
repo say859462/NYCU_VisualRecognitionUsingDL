@@ -47,8 +47,7 @@ def main():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
 
-            # 單次推論，直接 Softmax 取機率
-            avg_probs = F.softmax(model(images) * 30.0, dim=1)
+            avg_probs = F.softmax(model(images), dim=1)
 
             _, preds = torch.max(avg_probs, 1)
             all_predictions.extend(preds.cpu().numpy())

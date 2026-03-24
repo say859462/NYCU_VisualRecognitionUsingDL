@@ -12,17 +12,12 @@ def validate_one_epoch(model, val_loader, criterion, device):
         for images, labels in pbar:
             images, labels = images.to(device), labels.to(device)
 
-            # ⭐ 直接取用 Logits
-            outputs = model(images)
-            scaled_outputs = outputs * 30.0
-            loss = criterion(scaled_outputs, labels)
-
+            logits = model(images)
+            loss = criterion(logits, labels)
             running_loss += loss.item() * images.size(0)
 
-            # 預測類別直接取 Cosine 最大值即可 (因為數值單調遞增)
-            _, preds = torch.max(outputs, 1)
-
-            correct_preds += torch.sum(preds == labels.data).item()
+            preds = torch.argmax(logits, dim=1)
+            correct_preds += torch.sum(preds == labels).item()
             total_preds += images.size(0)
 
             all_predictions.extend(preds.cpu().numpy())
@@ -35,5 +30,4 @@ def validate_one_epoch(model, val_loader, criterion, device):
 
     epoch_loss = running_loss / total_preds
     epoch_acc = (correct_preds / total_preds) * 100
-
     return epoch_loss, epoch_acc, all_predictions, all_targets

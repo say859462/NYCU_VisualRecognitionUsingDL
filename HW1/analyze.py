@@ -48,8 +48,7 @@ def main():
         for images, labels in tqdm(val_loader, desc="Validating", colour="cyan"):
             images, labels = images.to(device), labels.to(device)
 
-            # 單次推論，無溫度縮放
-            logits = model(images) * 30.0
+            logits = model(images)
             probs = torch.softmax(logits, dim=1)
 
             loss = criterion(logits, labels)
