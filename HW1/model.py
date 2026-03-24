@@ -25,6 +25,7 @@ class SubCenterClassifier(nn.Module):
     Multi-prototype classifier:
     每個 class 有 K 個 sub-centers，logit 取 max over sub-centers
     """
+
     def __init__(self, in_features, num_classes, num_subcenters=3, scale=16.0, learn_scale=True):
         super().__init__()
         self.in_features = in_features
@@ -117,7 +118,12 @@ class ImageClassificationModel(nn.Module):
             scale=16.0,
             learn_scale=True
         )
-
+        self.embedding_fusion = nn.Sequential(
+            nn.Linear(512 * 2, embed_dim),
+            nn.BatchNorm1d(embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+        )
         self._freeze_shallow_layers()
         self.set_train_stage(1)
         self._init_new_layers()
@@ -142,7 +148,7 @@ class ImageClassificationModel(nn.Module):
 
         for module in [
             self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.embedding, self.classifier
+            self.pool, self.embedding, self.embedding_fusion, self.classifier
         ]:
             for param in module.parameters():
                 param.requires_grad = True
@@ -151,7 +157,7 @@ class ImageClassificationModel(nn.Module):
         params = []
         for module in [
             self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.embedding, self.classifier
+            self.pool, self.embedding, self.embedding_fusion, self.classifier
         ]:
             params.extend([p for p in module.parameters() if p.requires_grad])
         return params
@@ -182,11 +188,11 @@ class ImageClassificationModel(nn.Module):
         return [
             {
                 "params": [p for p in self.layer4.parameters() if p.requires_grad],
-                "lr": lr_base * 0.1,
+                "lr": lr_base * 0.05,
             },
             {
                 "params": head_params,
-                "lr": lr_base,
+                "lr": lr_base * 0.5,
             },
         ]
 
@@ -206,14 +212,34 @@ class ImageClassificationModel(nn.Module):
         pooled = self.pool(fused_map)
         return pooled, fused_map
 
+    def forward_features_with_local(self, x):
+        pooled, fused_map = self.forward_features(x)
+
+        # saliency: [B, H, W]
+        saliency = fused_map.pow(2).mean(dim=1, keepdim=True)
+
+        # normalize (soft attention)
+        saliency = saliency - saliency.amin(dim=(2, 3), keepdim=True)
+        saliency = saliency / (saliency.amax(dim=(2, 3), keepdim=True) + 1e-6)
+
+        # soft weighted pooling
+        weighted_feat = fused_map * saliency
+        local_feat = self.pool(weighted_feat)
+
+        return pooled, local_feat
+
     def forward_head(self, pooled):
         embed = self.embedding(pooled)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
 
     def forward(self, x):
-        pooled, _ = self.forward_features(x)
-        logits, _, _ = self.forward_head(pooled)
+        global_feat, local_feat = self.forward_features_with_local(x)
+
+        fused = torch.cat([global_feat, local_feat], dim=1)
+        fused = self.embedding_fusion(fused)
+
+        logits, _ = self.classifier(fused)
         return logits
 
     def get_saliency(self, x):
@@ -251,12 +277,14 @@ class ImageClassificationModel(nn.Module):
             self.proj_l4,
             self.fuse,
             self.embedding,
+            self.embedding_fusion,   # ⭐ 必加
         ]
 
         for module in modules_to_init:
             for m in module.modules():
                 if isinstance(m, nn.Conv2d):
-                    nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                    nn.init.kaiming_normal_(
+                        m.weight, mode="fan_out", nonlinearity="relu")
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
                 elif isinstance(m, nn.Linear):

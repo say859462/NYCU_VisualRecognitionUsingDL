@@ -47,18 +47,24 @@ def train_one_epoch(
         else:
             bg_views = None
 
-        with torch.amp.autocast('cuda', enabled=device.type == 'cuda'):
-            # full image branch
-            full_feat, _ = model.forward_features(images)
-            logits_full, _, _ = model.forward_head(full_feat)
+        use_amp = (device.type == 'cuda' and stage == 1)
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            # main branch
+            global_feat, local_feat = model.forward_features_with_local(images)
+            fused_feat = torch.cat([global_feat, local_feat], dim=1)
+            fused_feat = model.embedding_fusion(fused_feat)
 
-            loss_cls = criterion(logits_full, labels)
-            loss = loss_cls
+            logits_full, _ = model.classifier(fused_feat)
+            loss = criterion(logits_full, labels)
 
-            # background suppression auxiliary branch
+            # bg branch
             if do_bg_aux and bg_views is not None:
-                bg_feat, _ = model.forward_features(bg_views)
-                logits_bg, _, _ = model.forward_head(bg_feat)
+                bg_global, bg_local = model.forward_features_with_local(
+                    bg_views)
+                bg_fused = torch.cat([bg_global, bg_local], dim=1)
+                bg_fused = model.embedding_fusion(bg_fused)
+
+                logits_bg, _ = model.classifier(bg_fused)
                 loss_bg = criterion(logits_bg, labels)
                 loss = loss + bg_aux_weight * loss_bg
 

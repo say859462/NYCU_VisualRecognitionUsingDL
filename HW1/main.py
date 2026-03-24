@@ -182,8 +182,10 @@ def main():
 
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
-    start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float('inf'), 0
-    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
+    start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float(
+        'inf'), 0
+    history = {'train_loss': [], 'val_loss': [],
+               'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
     initial_stage = get_stage(start_epoch, stage1_epochs)
@@ -219,7 +221,8 @@ def main():
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             active_stage = resume_stage
 
-        print(f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+        print(
+            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
 
     training_start_time = time.time()
 
@@ -232,6 +235,8 @@ def main():
                 optimizer = build_optimizer(model, lr_base, stage)
                 scheduler = build_scheduler(
                     optimizer, stage, stage1_epochs, num_epochs)
+                scaler = torch.amp.GradScaler(
+                    'cuda', enabled=device.type == 'cuda')
                 print(
                     f"\n🔄 Switching to Stage {stage}: "
                     f"{'CE + light background suppression + prototype regularization' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
@@ -281,10 +286,12 @@ def main():
                 best_val_acc, best_val_loss, epochs_no_improve = val_acc, val_loss, 0
                 best_val_preds, best_val_labels = val_preds, val_labels
                 torch.save(model.state_dict(), best_model_path)
-                print(f"🌟 Found a better model! Updated {best_model_path} ({best_val_acc:.2f}%)")
+                print(
+                    f"🌟 Found a better model! Updated {best_model_path} ({best_val_acc:.2f}%)")
             else:
                 epochs_no_improve += 1
-                print(f"No improvement. Early Stopping counter: {epochs_no_improve}/{early_stopping_patience}")
+                print(
+                    f"No improvement. Early Stopping counter: {epochs_no_improve}/{early_stopping_patience}")
 
             torch.save({
                 'epoch': epoch,
