@@ -1,15 +1,14 @@
 {
   "batch_size": 16,
-  "num_epochs": 22,
-  "stage1_epochs": 18,
+  "num_epochs": 30,
+  "stage1_epochs": 24,
   "learning_rate": 0.0001,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
   "checkpoint_path": "./Model_Weight/checkpoint.pth",
   "best_model_path": "./Model_Weight/best_model.pth",
   "resume_training": false,
-  "early_stopping_patience": 8,
-  "hard_pairs_csv": "./Plot/EXP52_Diagnostic/top_confused_pairs.csv",
-  "hard_pairs_top_k": 10,
-  "hard_pair_boost": 1.8
+  "early_stopping_patience": 10,
+  "distill_alpha_mid": 0.1,
+  "distill_temperature": 1.0
 }

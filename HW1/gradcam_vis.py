@@ -33,7 +33,7 @@ def main():
     # ⭐ 刪除 cam = GradCAM(...) 的宣告，我們不需要它了
 
     preprocess_geo = transforms.Compose(
-        [transforms.Resize(576), transforms.CenterCrop(512)])
+        [transforms.Resize(512), transforms.CenterCrop(448)])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(), transforms.Normalize(
             [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])

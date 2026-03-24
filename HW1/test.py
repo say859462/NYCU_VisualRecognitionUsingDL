@@ -22,10 +22,9 @@ def main():
         config = json.load(f)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 確保解析度對齊 Exp 14
     test_transform = transforms.Compose([
-        transforms.Resize(576),
-        transforms.CenterCrop(512),
+        transforms.Resize(512),
+        transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])

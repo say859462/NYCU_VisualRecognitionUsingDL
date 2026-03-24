@@ -7,11 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
-import torchvision.transforms.functional as TF
 from torch.utils.data.sampler import Sampler
 from collections import defaultdict
 import copy
-import pandas as pd
 
 
 class PKSampler(Sampler):
@@ -73,103 +71,53 @@ class BalancedSoftmaxLoss(nn.Module):
         return F.cross_entropy(balanced_logits, targets)
 
 
-def load_hard_classes_from_csv(csv_path, top_k_pairs=10):
+def make_random_resized_views(images, scale_range=(0.6, 0.9), out_size=None):
     """
-    從 top_confused_pairs.csv 取出最常混淆的類別集合
-    需要欄位: True_Class, Pred_Class
+    Create random resized views directly from a tensor batch.
+    Each sample is cropped with an independent random box and resized back.
     """
-    if (csv_path is None) or (not os.path.exists(csv_path)):
-        print(f"⚠️ hard-pair csv not found: {csv_path}, fallback to normal sampling")
-        return []
-
-    df = pd.read_csv(csv_path)
-    required_cols = {"True_Class", "Pred_Class"}
-    if not required_cols.issubset(set(df.columns)):
-        print(f"⚠️ hard-pair csv missing columns {required_cols}, fallback to normal sampling")
-        return []
-
-    df = df.head(top_k_pairs)
-    hard_classes = set(df["True_Class"].tolist()) | set(df["Pred_Class"].tolist())
-    hard_classes = sorted(list(hard_classes))
-    print(f"🎯 Hard classes from csv: {hard_classes}")
-    return hard_classes
-
-
-def build_pair_aware_sample_weights(labels, hard_classes, boost=1.8):
-    """
-    對 hard classes 給較高抽樣權重，其餘維持 1.0
-    """
-    weights = np.ones(len(labels), dtype=np.float32)
-    if not hard_classes:
-        return torch.tensor(weights, dtype=torch.float32)
-
-    hard_set = set(hard_classes)
-    for i, y in enumerate(labels):
-        if int(y) in hard_set:
-            weights[i] = boost
-    return torch.tensor(weights, dtype=torch.float32)
-
-
-def make_attention_crops(images, saliency_maps, out_size=None, threshold_ratio=0.6, pad_ratio=0.15):
-    """
-    根據 saliency 生成 crop，保留 full image + local crop 的雙視角訓練
-    images: [B, C, H, W]
-    saliency_maps: [B, Hs, Ws]
-    """
-    device = images.device
     b, c, h, w = images.shape
-
     if out_size is None:
         out_size = (h, w)
 
-    crops = []
-    saliency_maps = saliency_maps.detach()
-
-    # 對齊到輸入影像大小
-    if saliency_maps.dim() == 3:
-        saliency_maps = saliency_maps.unsqueeze(1)  # [B,1,Hs,Ws]
-    saliency_maps = F.interpolate(
-        saliency_maps, size=(h, w), mode="bilinear", align_corners=False
-    ).squeeze(1)  # [B,H,W]
-
+    views = []
+    min_scale, max_scale = scale_range
     for i in range(b):
-        sal = saliency_maps[i]
-        sal = sal - sal.min()
-        maxv = sal.max()
+        scale = random.uniform(min_scale, max_scale)
+        crop_h = max(1, int(h * scale))
+        crop_w = max(1, int(w * scale))
 
-        if maxv.item() <= 1e-8:
-            crop = images[i:i+1]
-            crops.append(crop)
-            continue
+        if crop_h >= h:
+            top = 0
+            crop_h = h
+        else:
+            top = random.randint(0, h - crop_h)
 
-        sal = sal / maxv
-        mask = sal >= (sal.max() * threshold_ratio)
+        if crop_w >= w:
+            left = 0
+            crop_w = w
+        else:
+            left = random.randint(0, w - crop_w)
 
-        ys, xs = torch.where(mask)
-        if ys.numel() == 0 or xs.numel() == 0:
-            crop = images[i:i+1]
-            crops.append(crop)
-            continue
-
-        y1, y2 = ys.min().item(), ys.max().item() + 1
-        x1, x2 = xs.min().item(), xs.max().item() + 1
-
-        box_h = y2 - y1
-        box_w = x2 - x1
-
-        pad_h = max(1, int(box_h * pad_ratio))
-        pad_w = max(1, int(box_w * pad_ratio))
-
-        y1 = max(0, y1 - pad_h)
-        y2 = min(h, y2 + pad_h)
-        x1 = max(0, x1 - pad_w)
-        x2 = min(w, x2 + pad_w)
-
-        crop = images[i:i+1, :, y1:y2, x1:x2]
+        crop = images[i:i+1, :, top:top + crop_h, left:left + crop_w]
         crop = F.interpolate(crop, size=out_size, mode="bilinear", align_corners=False)
-        crops.append(crop)
+        views.append(crop)
 
-    return torch.cat(crops, dim=0).to(device)
+    return torch.cat(views, dim=0)
+
+
+def feature_distribution_kl(student_feat, teacher_feat, temperature=1.0):
+    """
+    Feature-level self-distillation.
+    Normalize across feature dimension and compute KL(student || teacher).
+    Teacher is detached externally or within this function.
+    """
+    teacher_feat = teacher_feat.detach()
+
+    student_log_prob = F.log_softmax(student_feat / temperature, dim=1)
+    teacher_prob = F.softmax(teacher_feat / temperature, dim=1)
+    kl = F.kl_div(student_log_prob, teacher_prob, reduction="batchmean")
+    return kl * (temperature ** 2)
 
 
 def plot_class_distribution(data_dir, title="Dataset Class Distribution", output_path="./Figures"):
@@ -214,6 +162,7 @@ def plot_training_curves(train_losses, val_losses, train_accs, val_accs, save_pa
     plt.close()
 
 
+
 def plot_per_class_error(all_preds, all_labels, num_classes=100, save_path="./Plot/class_error_dist.png"):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     error_rates = [np.sum(np.array(all_preds)[np.array(all_labels) == c] != c) / np.sum(np.array(
@@ -233,6 +182,7 @@ def plot_per_class_error(all_preds, all_labels, num_classes=100, save_path="./Pl
     plt.savefig(save_path)
     plt.close()
     return error_rates
+
 
 
 def plot_long_tail_accuracy(train_labels, val_preds, val_labels, num_classes=100, save_path="./Plot/long_tail_acc.png"):
@@ -260,6 +210,7 @@ def plot_long_tail_accuracy(train_labels, val_preds, val_labels, num_classes=100
     fig.tight_layout()
     plt.savefig(save_path)
     plt.close()
+
 
 
 def plot_correlation_analysis(train_counts, error_rates, output_path="./Plot/correlation_analysis.png"):

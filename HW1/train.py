@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from utils import make_attention_crops
+from utils import make_random_resized_views, feature_distribution_kl
 
 
 def train_one_epoch(
@@ -12,41 +12,50 @@ def train_one_epoch(
     device,
     scaler,
     stage,
-    dual_view=False,
-    full_weight=0.7,
-    crop_weight=0.3,
-    max_grad_norm=5.0
+    use_multiview_distill=False,
+    alpha_mid=0.10,
+    distill_temperature=1.0,
+    max_grad_norm=5.0,
 ):
     model.train()
     running_loss, correct_preds, total_preds = 0.0, 0, 0
 
-    pbar = tqdm(train_loader, desc=f"Training Epoch {epoch}", leave=False, colour="blue")
+    pbar = tqdm(
+        train_loader, desc=f"Training Epoch {epoch}", leave=False, colour="blue")
     for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
-        if dual_view and stage == 1:
-            saliency = model.get_saliency(images)
-            crop_images = make_attention_crops(
+        do_distill = use_multiview_distill and stage == 1
+
+        if do_distill:
+            mid_views = make_random_resized_views(
                 images,
-                saliency,
-                out_size=(images.shape[-2], images.shape[-1]),
-                threshold_ratio=0.6,
-                pad_ratio=0.15
+                scale_range=(0.65, 0.85),
+                out_size=(images.shape[-2], images.shape[-1])
             ).to(device)
         else:
-            crop_images = None
+            mid_views = None
 
         with torch.amp.autocast('cuda', dtype=torch.bfloat16, enabled=device.type == 'cuda'):
-            logits_full = model(images)
-            loss_full = criterion(logits_full, labels)
+            # full image branch
+            full_feat, _ = model.forward_features(images)
+            logits_full = model.classifier(full_feat)
+            loss_cls = criterion(logits_full, labels)
+            loss = loss_cls
 
-            if dual_view and stage == 1 and crop_images is not None:
-                logits_crop = model(crop_images)
-                loss_crop = criterion(logits_crop, labels)
-                loss = full_weight * loss_full + crop_weight * loss_crop
-            else:
-                loss = loss_full
+            # distillation branch
+            if do_distill and mid_views is not None:
+                teacher_feat = full_feat.detach()  # 關鍵：teacher 不回傳 gradient
+                mid_feat, _ = model.forward_features(mid_views)
+
+                loss_mid = feature_distribution_kl(
+                    mid_feat,
+                    teacher_feat,
+                    temperature=distill_temperature
+                )
+
+                loss = loss_cls + alpha_mid * loss_mid
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
