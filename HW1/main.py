@@ -1,8 +1,16 @@
-from utils import plot_training_curves, plot_per_class_error, plot_long_tail_accuracy, BalancedSoftmaxLoss
+from utils import (
+    plot_training_curves,
+    plot_per_class_error,
+    plot_long_tail_accuracy,
+    BalancedSoftmaxLoss,
+    load_hard_classes_from_csv,
+    build_pair_aware_sample_weights
+)
 from val import validate_one_epoch
 from train import train_one_epoch
 from model import ImageClassificationModel
 from dataset import ImageDataset
+
 import torch
 import os
 import math
@@ -12,7 +20,8 @@ import argparse
 import torch.nn as nn
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
-from torch.utils.data import DataLoader
+
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision import transforms
 
 cudnn.benchmark = True
@@ -44,8 +53,7 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         if self.T_max == self.warmup_epochs:
             return [self.eta_min for _ in self.base_lrs]
 
-        progress = (self.last_epoch - self.warmup_epochs) / \
-            max(1, self.T_max - self.warmup_epochs)
+        progress = (self.last_epoch - self.warmup_epochs) / max(1, self.T_max - self.warmup_epochs)
         progress = min(max(progress, 0.0), 1.0)
         return [
             self.eta_min + (base_lr - self.eta_min) *
@@ -86,7 +94,16 @@ def main():
     resume_training = config['resume_training']
     checkpoint_path = config['checkpoint_path']
     best_model_path = config['best_model_path']
-    stage1_epochs = config.get('stage1_epochs', 20)
+
+    # 推薦設定：Stage1 18 epoch，Stage2 4 epoch（總共 22）
+    stage1_epochs = config.get('stage1_epochs', 18)
+
+    hard_pairs_csv = config.get(
+        'hard_pairs_csv',
+        './Plot/EXP52_Diagnostic/top_confused_pairs.csv'
+    )
+    hard_pairs_top_k = config.get('hard_pairs_top_k', 10)
+    hard_pair_boost = config.get('hard_pair_boost', 1.8)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,12 +141,33 @@ def main():
         )
     ])
 
-    train_dataset = ImageDataset(
-        root_dir=data_dir, split="train", transform=train_transform)
-    val_dataset = ImageDataset(
-        root_dir=data_dir, split="val", transform=val_transform)
+    train_dataset = ImageDataset(root_dir=data_dir, split="train", transform=train_transform)
+    val_dataset = ImageDataset(root_dir=data_dir, split="val", transform=val_transform)
 
-    train_loader = DataLoader(
+    # Stage 1: hard-pair weighted sampling
+    hard_classes = load_hard_classes_from_csv(hard_pairs_csv, top_k_pairs=hard_pairs_top_k)
+    pair_weights = build_pair_aware_sample_weights(
+        train_dataset.targets,
+        hard_classes,
+        boost=hard_pair_boost
+    )
+    stage1_sampler = WeightedRandomSampler(
+        weights=pair_weights,
+        num_samples=len(pair_weights),
+        replacement=True
+    )
+
+    train_loader_stage1 = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=stage1_sampler,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True
+    )
+
+    # Stage 2: natural distribution + shuffle
+    train_loader_stage2 = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
@@ -137,6 +175,7 @@ def main():
         pin_memory=True,
         persistent_workers=True
     )
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
@@ -146,38 +185,36 @@ def main():
         persistent_workers=True
     )
 
-    model = ImageClassificationModel(
-        num_classes=num_classes, pretrained=True).to(device)
+    model = ImageClassificationModel(num_classes=num_classes, pretrained=True).to(device)
     if not model.check_parameters():
-        print("The number of parameter is greater than 100,000,00!")
+        print("The number of parameter is greater than 100,000,000!")
         return
 
     class_counts = torch.bincount(
-        torch.tensor(train_dataset.targets), minlength=num_classes).float().to(device)
+        torch.tensor(train_dataset.targets),
+        minlength=num_classes
+    ).float().to(device)
+
     criterion_stage1 = nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
     criterion_stage2 = BalancedSoftmaxLoss(class_counts).to(device)
     criterion_val = nn.CrossEntropyLoss().to(device)
 
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
 
-    start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float(
-        'inf'), 0
-    history = {'train_loss': [], 'val_loss': [],
-               'train_acc': [], 'val_acc': []}
+    start_epoch, best_val_acc, best_val_loss, epochs_no_improve = 0, 0.0, float('inf'), 0
+    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
     initial_stage = get_stage(start_epoch, stage1_epochs)
     model.set_train_stage(initial_stage)
     optimizer = build_optimizer(model, lr_base, initial_stage)
-    scheduler = build_scheduler(
-        optimizer, initial_stage, stage1_epochs, num_epochs)
+    scheduler = build_scheduler(optimizer, initial_stage, stage1_epochs, num_epochs)
 
     loaded_optimizer_state = False
-    active_stage = None
+    active_stage = initial_stage
 
     if resume_training and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(
-            checkpoint_path, map_location=device, weights_only=False)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_acc = checkpoint['best_val_acc']
@@ -190,8 +227,7 @@ def main():
         resume_stage = get_stage(start_epoch, stage1_epochs)
         model.set_train_stage(resume_stage)
         optimizer = build_optimizer(model, lr_base, resume_stage)
-        scheduler = build_scheduler(
-            optimizer, resume_stage, stage1_epochs, num_epochs)
+        scheduler = build_scheduler(optimizer, resume_stage, stage1_epochs, num_epochs)
 
         checkpoint_stage = get_stage(checkpoint['epoch'], stage1_epochs)
         if checkpoint_stage == resume_stage:
@@ -200,34 +236,53 @@ def main():
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             loaded_optimizer_state = True
             active_stage = resume_stage
-        print(
-            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+
+        print(f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
 
     training_start_time = time.time()
+
     try:
         for epoch in range(start_epoch, num_epochs):
             stage = get_stage(epoch, stage1_epochs)
+
             if stage != active_stage:
                 model.set_train_stage(stage)
                 optimizer = build_optimizer(model, lr_base, stage)
-                scheduler = build_scheduler(
-                    optimizer, stage, stage1_epochs, num_epochs)
-                if not loaded_optimizer_state or epoch != start_epoch:
-                    print(
-                        f"\n🔄 Switching to Stage {stage}: {'CE (stage 1)' if stage == 1 else 'Balanced Softmax calibration (stage 2)'}")
+                scheduler = build_scheduler(optimizer, stage, stage1_epochs, num_epochs)
+                print(
+                    f"\n🔄 Switching to Stage {stage}: "
+                    f"{'hard-pair + full/crop CE' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
+                )
                 active_stage = stage
 
             loaded_optimizer_state = False
             criterion_train = criterion_stage1 if stage == 1 else criterion_stage2
+            train_loader = train_loader_stage1 if stage == 1 else train_loader_stage2
+            dual_view = (stage == 1)
 
             print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
             print(
-                f"Stage {stage} | {'shuffle + CE(label_smoothing=0.05)' if stage == 1 else 'shuffle + Balanced Softmax'}")
+                f"Stage {stage} | "
+                f"{'hard-pair sampler + CE + dual-view crop' if stage == 1 else 'shuffle + Balanced Softmax'}"
+            )
 
             train_loss, train_acc = train_one_epoch(
-                model, train_loader, criterion_train, epoch+1, optimizer, device, scaler)
+                model=model,
+                train_loader=train_loader,
+                criterion=criterion_train,
+                epoch=epoch + 1,
+                optimizer=optimizer,
+                device=device,
+                scaler=scaler,
+                stage=stage,
+                dual_view=dual_view,
+                full_weight=0.7,
+                crop_weight=0.3
+            )
+
             val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
-                model, val_loader, criterion_val, device)
+                model, val_loader, criterion_val, device
+            )
 
             scheduler.step()
             history['train_loss'].append(train_loss)
@@ -236,18 +291,19 @@ def main():
             history['val_acc'].append(val_acc)
 
             print(
-                f"LR: {optimizer.param_groups[-1]['lr']:.6f} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+                f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
+                f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
+                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
+            )
 
             if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
                 best_val_acc, best_val_loss, epochs_no_improve = val_acc, val_loss, 0
                 best_val_preds, best_val_labels = val_preds, val_labels
                 torch.save(model.state_dict(), best_model_path)
-                print(
-                    f"🌟 Found a better model! Updated {best_model_path} ({best_val_acc:.2f}%)")
+                print(f"🌟 Found a better model! Updated {best_model_path} ({best_val_acc:.2f}%)")
             else:
                 epochs_no_improve += 1
-                print(
-                    f"No improvement. Early Stopping counter: {epochs_no_improve}/{early_stopping_patience}")
+                print(f"No improvement. Early Stopping counter: {epochs_no_improve}/{early_stopping_patience}")
 
             torch.save({
                 'epoch': epoch,
@@ -265,6 +321,7 @@ def main():
 
             if epochs_no_improve >= early_stopping_patience:
                 break
+
     except KeyboardInterrupt:
         print("\n" + "="*50 + "\nDetected Keyboard Interrupt.\n" + "="*50)
 
@@ -284,7 +341,8 @@ def main():
 
         if best_val_preds and best_val_labels:
             plot_per_class_error(
-                best_val_preds, best_val_labels,
+                best_val_preds,
+                best_val_labels,
                 num_classes=num_classes,
                 save_path=os.path.join(plot_dir, "error_dist.png")
             )
@@ -297,7 +355,9 @@ def main():
             )
 
     print(
-        f"\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}")
+        f"\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | "
+        f"Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
+    )
 
 
 if __name__ == "__main__":

@@ -1,154 +1,239 @@
+import os
 import torch
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import os
-import pandas as pd
+
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from sklearn.manifold import TSNE
 from sklearn.metrics import confusion_matrix
-from tqdm import tqdm
 
-# 載入您的自定義模組
 from dataset import ImageDataset
 from model import ImageClassificationModel
 
 
-def get_features_and_preds(model, dataloader, device):
+def get_embeddings_preds_labels_paths(model, dataloader, device, image_paths):
     """
-    使用 PyTorch Hook 安全提取 GeM 後的 fused embedding 和預測結果
+    直接提取 fused embedding、prediction、label、confidence、image path
+    優先使用 model.forward_features()，避免 hook 失敗或不穩定。
     """
     model.eval()
+
     all_embeddings = []
+    all_logits = []
     all_preds = []
     all_labels = []
 
-    # 1. 建立 Hook 攔截特徵
-    activation = {}
-
-    def get_activation(name):
-        def hook(model, input, output):
-            activation[name] = input[0].detach()
-        return hook
-
-    handle = model.classifier.register_forward_hook(get_activation('embed'))
-
-    # 2. 執行推論
     with torch.no_grad():
+        start_idx = 0
         for images, labels in tqdm(dataloader, desc="Extracting Features", colour="cyan"):
             images = images.to(device)
-            outputs = model(images)
-            preds = torch.argmax(outputs, dim=1)
 
-            all_embeddings.append(activation['embed'].cpu().numpy())
+            if hasattr(model, "forward_features"):
+                embeddings, _ = model.forward_features(images)
+                logits = model.classifier(embeddings)
+            else:
+                logits = model(images)
+                embeddings = logits  # fallback，不理想但至少可跑
+
+            preds = torch.argmax(logits, dim=1)
+
+            all_embeddings.append(embeddings.cpu().numpy())
+            all_logits.append(logits.cpu().numpy())
             all_preds.append(preds.cpu().numpy())
             all_labels.append(labels.numpy())
 
-    # 移除 hook 以免影響後續記憶體
-    handle.remove()
+            start_idx += len(labels)
 
-    return (np.concatenate(all_embeddings),
-            np.concatenate(all_preds),
-            np.concatenate(all_labels))
+    embeddings = np.concatenate(all_embeddings, axis=0)
+    logits = np.concatenate(all_logits, axis=0)
+    preds = np.concatenate(all_preds, axis=0)
+    labels = np.concatenate(all_labels, axis=0)
+
+    probs = torch.softmax(torch.tensor(logits), dim=1).numpy()
+    confs = probs.max(axis=1)
+
+    return embeddings, logits, probs, preds, labels, confs, image_paths
 
 
 def plot_global_confusion_matrix(y_true, y_pred, num_classes, save_path):
-    """
-    繪製完整的 100x100 混淆矩陣
-    """
     cm = confusion_matrix(y_true, y_pred, labels=range(num_classes))
 
-    plt.figure(figsize=(24, 20))  # 尺寸需夠大才塞得下 100 類
+    plt.figure(figsize=(24, 20))
     sns.heatmap(cm, cmap='Blues', xticklabels=True,
                 yticklabels=True, annot=False)
     plt.title("Global Confusion Matrix (100 Classes)",
-              fontsize=24, fontweight='bold')
-    plt.ylabel('True Label', fontsize=18)
-    plt.xlabel('Predicted Label', fontsize=18)
+              fontsize=22, fontweight='bold')
+    plt.ylabel("True Label", fontsize=16)
+    plt.xlabel("Predicted Label", fontsize=16)
     plt.xticks(fontsize=6, rotation=90)
     plt.yticks(fontsize=6)
-
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
-    print(f"📊 Global Confusion Matrix saved to: {save_path}")
+    print(f"📊 Saved global confusion matrix -> {save_path}")
 
 
 def analyze_top_confusions(y_true, y_pred, num_classes, save_csv_path, top_k=20):
-    """
-    自動抓出最常被混淆的 Top-K 類別對，並輸出為 CSV
-    """
     cm = confusion_matrix(y_true, y_pred, labels=range(num_classes))
-    np.fill_diagonal(cm, 0)  # 將對角線 (預測正確的) 設為 0，只看錯誤的
+    np.fill_diagonal(cm, 0)
 
-    confusions = []
+    rows = []
     for true_class in range(num_classes):
         for pred_class in range(num_classes):
             count = cm[true_class, pred_class]
             if count > 0:
-                confusions.append({
-                    'True_Class': true_class,
-                    'Pred_Class': pred_class,
-                    'Error_Count': count
+                rows.append({
+                    "True_Class": true_class,
+                    "Pred_Class": pred_class,
+                    "Error_Count": int(count)
                 })
 
-    df = pd.DataFrame(confusions)
-    if not df.empty:
-        df = df.sort_values(by='Error_Count', ascending=False).head(top_k)
-        df.to_csv(save_csv_path, index=False)
-        print(f"⚠️ Top {top_k} Confusions saved to: {save_csv_path}")
-        print("\n--- Top Confused Class Pairs ---")
-        print(df.to_string(index=False))
-        print("--------------------------------\n")
-    else:
-        print("🎉 No confusions found! (100% accuracy)")
+    df = pd.DataFrame(rows)
+    if len(df) == 0:
+        print("🎉 No confusions found.")
+        return df
+
+    df = df.sort_values(by="Error_Count", ascending=False).head(
+        top_k).reset_index(drop=True)
+    df.to_csv(save_csv_path, index=False)
+    print(f"⚠️ Saved top confused pairs -> {save_csv_path}")
+    print(df.to_string(index=False))
+    return df
+
+
+def build_per_class_summary(train_labels, val_labels, val_preds, num_classes, save_csv_path):
+    train_counts = np.bincount(train_labels, minlength=num_classes)
+    val_counts = np.bincount(val_labels, minlength=num_classes)
+
+    cm = confusion_matrix(val_labels, val_preds, labels=range(num_classes))
+    summary = []
+
+    for cls in range(num_classes):
+        correct = int(cm[cls, cls])
+        total = int(val_counts[cls])
+        val_acc = (correct / total * 100.0) if total > 0 else 0.0
+
+        row = cm[cls].copy()
+        row[cls] = 0
+        top_mistaken_class = int(np.argmax(row)) if row.sum() > 0 else -1
+        top_mistake_count = int(
+            row[top_mistaken_class]) if row.sum() > 0 else 0
+
+        summary.append({
+            "Class_ID": cls,
+            "Train_Count": int(train_counts[cls]),
+            "Val_Count": total,
+            "Val_Correct": correct,
+            "Val_Acc(%)": round(val_acc, 2),
+            "Top_Mistaken_As": top_mistaken_class,
+            "Top_Mistake_Count": top_mistake_count
+        })
+
+    df = pd.DataFrame(summary)
+    df = df.sort_values(by=["Val_Acc(%)", "Train_Count"], ascending=[
+                        True, True]).reset_index(drop=True)
+    df.to_csv(save_csv_path, index=False)
+    print(f"📄 Saved per-class summary -> {save_csv_path}")
+    return df
+
+
+def export_hardest_mistakes(image_paths, labels, preds, confs, probs, save_csv_path, top_k=100):
+    rows = []
+    for path, y, p, conf, prob_vec in zip(image_paths, labels, preds, confs, probs):
+        if y != p:
+            rows.append({
+                "Image_Path": path,
+                "True_Class": int(y),
+                "Pred_Class": int(p),
+                "Pred_Conf": float(conf),
+                "True_Class_Prob": float(prob_vec[y]),
+            })
+
+    df = pd.DataFrame(rows)
+    if len(df) == 0:
+        print("🎉 No mistakes found.")
+        return df
+
+    df = df.sort_values(by="Pred_Conf", ascending=False).head(
+        top_k).reset_index(drop=True)
+    df.to_csv(save_csv_path, index=False)
+    print(f"🧨 Saved hardest mistakes -> {save_csv_path}")
+    return df
+
+
+def get_top_confused_class_set(confused_df, max_classes=12):
+    """
+    從 top confused pairs 自動整理出最值得觀察的 class set
+    """
+    if confused_df is None or len(confused_df) == 0:
+        return []
+
+    classes = []
+    for _, row in confused_df.iterrows():
+        classes.extend([int(row["True_Class"]), int(row["Pred_Class"])])
+
+    counts = pd.Series(classes).value_counts()
+    return counts.head(max_classes).index.tolist()
 
 
 def plot_local_confusion_matrix(y_true, y_pred, target_classes, save_path):
-    """
-    繪製特定易混淆類別的局部混淆矩陣
-    """
+    if len(target_classes) == 0:
+        print("No target classes for local confusion matrix.")
+        return
+
     mask = np.isin(y_true, target_classes) & np.isin(y_pred, target_classes)
     y_true_filtered = y_true[mask]
     y_pred_filtered = y_pred[mask]
 
     if len(y_true_filtered) == 0:
         print(
-            f"No predictions found among the target classes {target_classes} to plot local CM.")
+            "No samples available among selected target classes for local confusion matrix.")
         return
 
     cm = confusion_matrix(
         y_true_filtered, y_pred_filtered, labels=target_classes)
 
     plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Reds',
-                xticklabels=target_classes, yticklabels=target_classes)
-    plt.title(
-        f"Local Confusion Matrix\n(Focus Classes: {target_classes})", fontweight='bold')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt='d',
+        cmap='Reds',
+        xticklabels=target_classes,
+        yticklabels=target_classes
+    )
+    plt.title("Local Confusion Matrix (Top Confused Classes)", fontweight='bold')
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+    plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
-    print(f"🎯 Local Confusion Matrix saved to: {save_path}")
+    print(f"🎯 Saved local confusion matrix -> {save_path}")
 
 
 def plot_tsne(embeddings, labels, target_classes, save_path):
-    """
-    繪製 t-SNE (適配最新版 sklearn)
-    """
+    if len(target_classes) == 0:
+        print("No target classes for t-SNE.")
+        return
+
     mask = np.isin(labels, target_classes)
     feat_subset = embeddings[mask]
     label_subset = labels[mask]
 
-    if len(feat_subset) == 0:
-        print("No samples found for the target classes for t-SNE.")
+    if len(feat_subset) < 5:
+        print("Not enough samples for t-SNE.")
         return
 
+    perplexity = min(30, max(5, len(feat_subset) - 1))
     print(f"Running t-SNE on {len(feat_subset)} samples...")
+
     tsne = TSNE(
         n_components=2,
-        perplexity=min(30, len(feat_subset) - 1),
+        perplexity=perplexity,
         random_state=42,
         init='pca',
         learning_rate='auto'
@@ -157,7 +242,7 @@ def plot_tsne(embeddings, labels, target_classes, save_path):
 
     plt.figure(figsize=(12, 10))
     unique_classes = np.unique(label_subset)
-    colors = plt.cm.tab10(np.linspace(0, 1, len(unique_classes)))
+    colors = plt.cm.tab20(np.linspace(0, 1, len(unique_classes)))
 
     for i, class_id in enumerate(unique_classes):
         class_mask = (label_subset == class_id)
@@ -167,86 +252,134 @@ def plot_tsne(embeddings, labels, target_classes, save_path):
             label=f"Class {class_id}",
             color=colors[i],
             alpha=0.8,
-            s=60,
+            s=45,
             edgecolors='w'
         )
 
-    plt.legend(title="Classes", bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.title(f"t-SNE Feature Space Visualization",
-              fontsize=16, fontweight='bold')
-    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend(title="Classes", bbox_to_anchor=(1.02, 1), loc='upper left')
+    plt.title("t-SNE of Top Confused Classes", fontsize=16, fontweight='bold')
+    plt.grid(True, linestyle='--', alpha=0.4)
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
-    print(f"🌌 t-SNE plot saved to: {save_path}")
+    print(f"🌌 Saved t-SNE -> {save_path}")
 
 
 def main():
-    # ==========================================
-    # 1. 參數設定
-    # ==========================================
-    MODEL_PATH = './Model_Weight/best_model.pth'
-    DATA_DIR = './Dataset/data'
+    MODEL_PATH = "./Model_Weight/52th/best_model.pth"
+    DATA_DIR = "./Dataset/data"
+    OUTPUT_DIR = "./Plot/EXP53_Diagnostic"
+    NUM_CLASSES = 100
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # ⭐ 更新資料夾名稱，對齊當前實驗進度
-    OUTPUT_DIR = './Plot/EXP52_Diagnostic'
-
-    # 您可以根據先前的 error_dist.png 或是這次產出的 CSV 來替換這些 ID
-    # 目前預設為之前表現較差的類別 ID
-    TARGET_CLASSES = [58, 74, 88, 99, 2, 6, 7, 10, 15, 19, 20, 24, 33, 44, 45, 54, 59, 68, 75, 76, 83]
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print(f"Device: {DEVICE} | Output Dir: {OUTPUT_DIR}")
+    print(f"Device: {DEVICE}")
+    print(f"Output Dir: {OUTPUT_DIR}")
 
-    # ==========================================
-    # 2. 資料準備
-    # ==========================================
     val_transform = transforms.Compose([
         transforms.Resize(576),
         transforms.CenterCrop(512),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
     ])
+
     val_dataset = ImageDataset(
         root_dir=DATA_DIR, split="val", transform=val_transform)
-    val_loader = DataLoader(val_dataset, batch_size=16,
-                            shuffle=False, num_workers=4)
+    train_dataset = ImageDataset(
+        root_dir=DATA_DIR, split="train", transform=None)
 
-    # ==========================================
-    # 3. 模型載入與特徵提取
-    # ==========================================
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=16,
+        shuffle=False,
+        num_workers=4
+    )
+
     model = ImageClassificationModel(
-        num_classes=100, pretrained=False).to(DEVICE)
+        num_classes=NUM_CLASSES, pretrained=False).to(DEVICE)
 
-    if os.path.exists(MODEL_PATH):
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
-        print(f"✅ Loaded weights from {MODEL_PATH}")
-    else:
-        print(f"❌ Error: Model weight not found at {MODEL_PATH}")
+    if not os.path.exists(MODEL_PATH):
+        print(f"❌ Model weight not found: {MODEL_PATH}")
         return
 
-    embeddings, preds, labels = get_features_and_preds(
-        model, val_loader, DEVICE)
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    print(f"✅ Loaded model from: {MODEL_PATH}")
 
-    # ==========================================
-    # 4. 全面診斷分析
-    # ==========================================
-    # (A) 匯出最常混淆的 Top 20 類別 (最強大的除錯工具)
-    analyze_top_confusions(labels, preds, num_classes=100,
-                           save_csv_path=f'{OUTPUT_DIR}/top_confused_pairs.csv', top_k=20)
+    embeddings, logits, probs, preds, labels, confs, image_paths = get_embeddings_preds_labels_paths(
+        model,
+        val_loader,
+        DEVICE,
+        val_dataset.image_paths
+    )
 
-    # (B) 繪製 100x100 全局混淆矩陣
-    plot_global_confusion_matrix(labels, preds, num_classes=100,
-                                 save_path=f'{OUTPUT_DIR}/cm_global.png')
+    # 1) top confused pairs
+    confused_df = analyze_top_confusions(
+        labels,
+        preds,
+        num_classes=NUM_CLASSES,
+        save_csv_path=os.path.join(OUTPUT_DIR, "top_confused_pairs.csv"),
+        top_k=20
+    )
 
-    # (C) 繪製局部混淆矩陣 (針對 Target Classes)
-    plot_local_confusion_matrix(labels, preds, TARGET_CLASSES,
-                                f'{OUTPUT_DIR}/cm_local_target.png')
+    # 2) per-class summary
+    per_class_df = build_per_class_summary(
+        train_labels=np.array(train_dataset.targets),
+        val_labels=labels,
+        val_preds=preds,
+        num_classes=NUM_CLASSES,
+        save_csv_path=os.path.join(OUTPUT_DIR, "per_class_summary.csv")
+    )
 
-    # (D) 繪製 t-SNE 特徵分布圖
-    plot_tsne(embeddings, labels, TARGET_CLASSES,
-              f'{OUTPUT_DIR}/tsne_local_target.png')
+    # 3) hardest mistakes
+    hardest_df = export_hardest_mistakes(
+        image_paths=image_paths,
+        labels=labels,
+        preds=preds,
+        confs=confs,
+        probs=probs,
+        save_csv_path=os.path.join(OUTPUT_DIR, "hardest_mistakes.csv"),
+        top_k=100
+    )
+
+    # 4) global confusion matrix
+    plot_global_confusion_matrix(
+        labels,
+        preds,
+        num_classes=NUM_CLASSES,
+        save_path=os.path.join(OUTPUT_DIR, "cm_global.png")
+    )
+
+    # 5) auto target classes from top confused pairs
+    target_classes = get_top_confused_class_set(confused_df, max_classes=12)
+    print(f"🎯 Auto selected target classes: {target_classes}")
+
+    # 6) local confusion matrix
+    plot_local_confusion_matrix(
+        labels,
+        preds,
+        target_classes=target_classes,
+        save_path=os.path.join(OUTPUT_DIR, "cm_top_confused_classes.png")
+    )
+
+    # 7) tsne
+    plot_tsne(
+        embeddings,
+        labels,
+        target_classes=target_classes,
+        save_path=os.path.join(OUTPUT_DIR, "tsne_top_confused_classes.png")
+    )
+
+    print("\n✅ Analysis complete.")
+    print("Generated files:")
+    print("- top_confused_pairs.csv")
+    print("- per_class_summary.csv")
+    print("- hardest_mistakes.csv")
+    print("- cm_global.png")
+    print("- cm_top_confused_classes.png")
+    print("- tsne_top_confused_classes.png")
 
 
 if __name__ == "__main__":

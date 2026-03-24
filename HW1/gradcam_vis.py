@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/Attention_Outputs/52th')  # ⭐ 建議改名
+                        default='./Plot/Attention_Outputs/53th')  # ⭐ 建議改名
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
