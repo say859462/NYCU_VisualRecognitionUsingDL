@@ -48,27 +48,16 @@ def train_one_epoch(
             bg_views = None
 
         use_amp = (device.type == 'cuda' and stage == 1)
-        with torch.amp.autocast('cuda', enabled=use_amp):
-            # main branch
-            global_feat, local_feat = model.forward_features_with_local(images)
-            fused_feat = torch.cat([global_feat, local_feat], dim=1)
-            fused_feat = model.embedding_fusion(fused_feat)
 
-            logits_full, _ = model.classifier(fused_feat)
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            logits_full = model(images)
             loss = criterion(logits_full, labels)
 
-            # bg branch
             if do_bg_aux and bg_views is not None:
-                bg_global, bg_local = model.forward_features_with_local(
-                    bg_views)
-                bg_fused = torch.cat([bg_global, bg_local], dim=1)
-                bg_fused = model.embedding_fusion(bg_fused)
-
-                logits_bg, _ = model.classifier(bg_fused)
+                logits_bg = model(bg_views)
                 loss_bg = criterion(logits_bg, labels)
                 loss = loss + bg_aux_weight * loss_bg
 
-            # prototype diversity regularizer
             loss_proto = model.prototype_diversity_loss(margin=0.2)
             loss = loss + proto_div_weight * loss_proto
 

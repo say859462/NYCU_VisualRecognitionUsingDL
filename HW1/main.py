@@ -86,7 +86,7 @@ def main():
 
     batch_size = config['batch_size']
     num_epochs = config.get('num_epochs', 30)
-    lr_base = config.get('learning_rate', 1e-4)
+    lr_base = config.get('learning_rate', 8e-5)
     early_stopping_patience = config.get('early_stopping_patience', 10)
     num_classes = config['num_classes']
     data_dir = config['data_dir']
@@ -97,8 +97,8 @@ def main():
         'best_loss_model_path',
         './Model_Weight/best_loss_model.pth'
     )
-    # New experiment
-    stage1_epochs = config.get('stage1_epochs', 24)
+
+    stage1_epochs = config.get('stage1_epochs', 12)
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
     bg_aux_weight = config.get('bg_aux_weight', 0.20)
@@ -187,10 +187,9 @@ def main():
 
     start_epoch, epochs_no_improve = 0, 0
     best_val_acc = 0.0
-    best_val_loss_for_acc = float('inf')   # 給 acc tie-break 用
-    best_val_loss_only = float('inf')      # 純 loss best
-    history = {'train_loss': [], 'val_loss': [],
-               'train_acc': [], 'val_acc': []}
+    best_val_loss_for_acc = float('inf')
+    best_val_loss_only = float('inf')
+    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
     best_val_preds, best_val_labels = [], []
 
     initial_stage = get_stage(start_epoch, stage1_epochs)
@@ -211,9 +210,9 @@ def main():
         epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
         best_val_preds = checkpoint.get('best_val_preds', [])
         best_val_labels = checkpoint.get('best_val_labels', [])
-        best_val_loss_for_acc = checkpoint.get(
-            'best_val_loss_for_acc', float('inf'))
+        best_val_loss_for_acc = checkpoint.get('best_val_loss_for_acc', float('inf'))
         best_val_loss_only = checkpoint.get('best_val_loss_only', float('inf'))
+
         resume_stage = get_stage(start_epoch, stage1_epochs)
         model.set_train_stage(resume_stage)
         optimizer = build_optimizer(model, lr_base, resume_stage)
@@ -227,8 +226,7 @@ def main():
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             active_stage = resume_stage
 
-        print(
-            f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
+        print(f"✅ Successfully loaded checkpoint! Resuming from Epoch {start_epoch+1}.")
 
     training_start_time = time.time()
 
@@ -245,7 +243,7 @@ def main():
                     'cuda', enabled=device.type == 'cuda')
                 print(
                     f"\n🔄 Switching to Stage {stage}: "
-                    f"{'CE + light background suppression + prototype regularization' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
+                    f"{'CE + gated global-local fusion + background suppression aux' if stage == 1 else 'short classifier calibration + Balanced Softmax'}"
                 )
                 active_stage = stage
 
@@ -255,7 +253,7 @@ def main():
             print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
             print(
                 f"Stage {stage} | "
-                f"{'shuffle + CE + background suppression aux + multi-prototype head' if stage == 1 else 'shuffle + Balanced Softmax'}"
+                f"{'shuffle + CE + gated global/local fusion + background suppression aux + multi-prototype head' if stage == 1 else 'shuffle + Balanced Softmax'}"
             )
 
             train_loss, train_acc = train_one_epoch(
@@ -287,25 +285,31 @@ def main():
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
                 f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
             )
-            # --- ACC best ---
+
+            improved = False
+
             if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
                 best_val_acc = val_acc
                 best_val_loss_for_acc = val_loss
-                epochs_no_improve = 0
                 best_val_preds = val_preds
                 best_val_labels = val_labels
+                improved = True
+
                 torch.save(model.state_dict(), best_model_path)
                 print(f"🌟 Best ACC model saved ({best_val_acc:.2f}%)")
 
-            else:
-                epochs_no_improve += 1
-
-            # --- LOSS best ---
             if val_loss < best_val_loss_only:
                 best_val_loss_only = val_loss
+                improved = True
 
                 torch.save(model.state_dict(), best_loss_model_path)
                 print(f"💡 Best LOSS model saved ({best_val_loss_only:.4f})")
+
+            if improved:
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                print(f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
 
             torch.save({
                 'epoch': epoch,

@@ -35,7 +35,11 @@ def main():
         test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
 
     model = ImageClassificationModel(
-        num_classes=config['num_classes'], pretrained=False).to(device)
+        num_classes=config['num_classes'],
+        pretrained=False,
+        num_subcenters=config.get('num_subcenters', 3),
+        embed_dim=config.get('embed_dim', 256)
+    ).to(device)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
 
@@ -45,9 +49,7 @@ def main():
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
             images = images.to(device)
-
             avg_probs = F.softmax(model(images), dim=1)
-
             _, preds = torch.max(avg_probs, 1)
             all_predictions.extend(preds.cpu().numpy())
 

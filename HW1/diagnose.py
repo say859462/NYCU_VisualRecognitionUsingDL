@@ -16,16 +16,6 @@ from model import ImageClassificationModel
 
 
 def get_embeddings_preds_labels_paths(model, dataloader, device, image_paths):
-    """
-    提取：
-    - embedding
-    - class logits
-    - all subcenter logits
-    - prediction
-    - label
-    - confidence
-    - assigned subcenter
-    """
     model.eval()
 
     all_embeddings = []
@@ -37,12 +27,10 @@ def get_embeddings_preds_labels_paths(model, dataloader, device, image_paths):
     with torch.no_grad():
         for images, labels in tqdm(dataloader, desc="Extracting Features", colour="cyan"):
             images = images.to(device)
+            labels = labels.to(device)
 
             pooled, _ = model.forward_features(images)
             logits, embed, logits_all = model.forward_head(pooled)
-            # logits: [B, C]
-            # embed: [B, D]
-            # logits_all: [B, C, K]
 
             preds = torch.argmax(logits, dim=1)
 
@@ -50,7 +38,7 @@ def get_embeddings_preds_labels_paths(model, dataloader, device, image_paths):
             all_logits.append(logits.cpu().numpy())
             all_logits_all.append(logits_all.cpu().numpy())
             all_preds.append(preds.cpu().numpy())
-            all_labels.append(labels.numpy())
+            all_labels.append(labels.cpu().numpy())
 
     embeddings = np.concatenate(all_embeddings, axis=0)
     logits = np.concatenate(all_logits, axis=0)
@@ -58,14 +46,22 @@ def get_embeddings_preds_labels_paths(model, dataloader, device, image_paths):
     preds = np.concatenate(all_preds, axis=0)
     labels = np.concatenate(all_labels, axis=0)
 
+    # ✅ safer softmax
     probs = torch.softmax(torch.tensor(logits), dim=1).numpy()
     confs = probs.max(axis=1)
 
+    # ===============================
+    # ✅ 正確計算 subcenter
+    # ===============================
     assigned_subcenters = []
+
     for i in range(len(preds)):
         pred_cls = preds[i]
-        sub_idx = int(np.argmax(logits_all[i, pred_cls]))
-        assigned_subcenters.append(sub_idx)
+
+        # logits_all: [C, K]
+        sub_id = int(np.argmax(logits_all[i, pred_cls]))
+        assigned_subcenters.append(sub_id)
+
     assigned_subcenters = np.array(assigned_subcenters)
 
     return (
@@ -403,7 +399,7 @@ def plot_tsne_by_subcenter(embeddings, labels, assigned_subcenters, target_class
 def main():
     MODEL_PATH = "./Model_Weight/best_model.pth"
     DATA_DIR = "./Dataset/data"
-    OUTPUT_DIR = "./Plot/Subcenter_Diagnostic_55th"
+    OUTPUT_DIR = "./Plot/Subcenter_Diagnostic_56th"
     NUM_CLASSES = 100
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -448,7 +444,13 @@ def main():
         return
 
     state = torch.load(MODEL_PATH, map_location=DEVICE)
-    model.load_state_dict(state)
+
+    if isinstance(state, dict) and "model" in state:
+        model.load_state_dict(state["model"])
+        print("✅ Loaded model weights from state['model']")
+    else:
+        model.load_state_dict(state)
+        print("✅ Loaded raw state_dict")
     print(f"✅ Loaded model from: {MODEL_PATH}")
 
     (

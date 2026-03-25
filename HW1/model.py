@@ -47,15 +47,12 @@ class SubCenterClassifier(nn.Module):
         nn.init.normal_(self.weight, mean=0.0, std=0.01)
 
     def forward(self, x):
-        # x: [B, D]
         x = F.normalize(x, dim=1)
         w = F.normalize(self.weight, dim=2)  # [C, K, D]
 
-        # logits_all: [B, C, K]
         logits_all = torch.einsum("bd,ckd->bck", x, w)
         logits_all = logits_all * self.scale.clamp(min=1.0)
 
-        # class logits: max over sub-centers
         class_logits, _ = logits_all.max(dim=2)
         return class_logits, logits_all
 
@@ -102,7 +99,18 @@ class ImageClassificationModel(nn.Module):
 
         self.pool = GeM(p=3.0, learn_p=True)
 
-        # Light bottleneck
+        # Gated fusion:
+        # gate = sigmoid(MLP([global, local]))
+        # fused = gate * global + (1 - gate) * local
+        self.gate_fc = nn.Sequential(
+            nn.Linear(512 * 2, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.2),
+            nn.Linear(512, 512),
+        )
+
+        # Embedding head
         self.embedding = nn.Sequential(
             nn.Linear(512, embed_dim),
             nn.BatchNorm1d(embed_dim),
@@ -118,12 +126,7 @@ class ImageClassificationModel(nn.Module):
             scale=16.0,
             learn_scale=True
         )
-        self.embedding_fusion = nn.Sequential(
-            nn.Linear(512 * 2, embed_dim),
-            nn.BatchNorm1d(embed_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-        )
+
         self._freeze_shallow_layers()
         self.set_train_stage(1)
         self._init_new_layers()
@@ -137,8 +140,6 @@ class ImageClassificationModel(nn.Module):
         if stage not in (1, 2):
             raise ValueError("stage should be 1 or 2")
 
-        # Stage 1: train layer2~4 + head
-        # Stage 2: only train layer4 + head
         for param in self.layer2.parameters():
             param.requires_grad = (stage == 1)
         for param in self.layer3.parameters():
@@ -148,7 +149,7 @@ class ImageClassificationModel(nn.Module):
 
         for module in [
             self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.embedding, self.embedding_fusion, self.classifier
+            self.pool, self.gate_fc, self.embedding, self.classifier
         ]:
             for param in module.parameters():
                 param.requires_grad = True
@@ -157,7 +158,7 @@ class ImageClassificationModel(nn.Module):
         params = []
         for module in [
             self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.embedding, self.embedding_fusion, self.classifier
+            self.pool, self.gate_fc, self.embedding, self.classifier
         ]:
             params.extend([p for p in module.parameters() if p.requires_grad])
         return params
@@ -213,33 +214,32 @@ class ImageClassificationModel(nn.Module):
         return pooled, fused_map
 
     def forward_features_with_local(self, x):
-        pooled, fused_map = self.forward_features(x)
+        global_feat, fused_map = self.forward_features(x)
 
-        # saliency: [B, H, W]
         saliency = fused_map.pow(2).mean(dim=1, keepdim=True)
-
-        # normalize (soft attention)
         saliency = saliency - saliency.amin(dim=(2, 3), keepdim=True)
         saliency = saliency / (saliency.amax(dim=(2, 3), keepdim=True) + 1e-6)
 
-        # soft weighted pooling
         weighted_feat = fused_map * saliency
         local_feat = self.pool(weighted_feat)
 
-        return pooled, local_feat
+        return global_feat, local_feat
 
-    def forward_head(self, pooled):
-        embed = self.embedding(pooled)
+    def gated_fusion(self, global_feat, local_feat):
+        fusion_input = torch.cat([global_feat, local_feat], dim=1)
+        gate = torch.sigmoid(self.gate_fc(fusion_input))
+        fused = gate * global_feat + (1.0 - gate) * local_feat
+        return fused
+
+    def forward_head(self, pooled_512):
+        embed = self.embedding(pooled_512)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
 
     def forward(self, x):
         global_feat, local_feat = self.forward_features_with_local(x)
-
-        fused = torch.cat([global_feat, local_feat], dim=1)
-        fused = self.embedding_fusion(fused)
-
-        logits, _ = self.classifier(fused)
+        fused = self.gated_fusion(global_feat, local_feat)
+        logits, _, _ = self.forward_head(fused)
         return logits
 
     def get_saliency(self, x):
@@ -252,10 +252,6 @@ class ImageClassificationModel(nn.Module):
         return saliency
 
     def prototype_diversity_loss(self, margin=0.2):
-        """
-        Encourage different sub-centers of the same class
-        not to collapse into one prototype.
-        """
         w = F.normalize(self.classifier.weight, dim=2)  # [C, K, D]
         c, k, d = w.shape
         if k <= 1:
@@ -276,8 +272,8 @@ class ImageClassificationModel(nn.Module):
             self.proj_l3,
             self.proj_l4,
             self.fuse,
+            self.gate_fc,
             self.embedding,
-            self.embedding_fusion,   # ⭐ 必加
         ]
 
         for module in modules_to_init:
@@ -299,5 +295,5 @@ class ImageClassificationModel(nn.Module):
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
-        print(f"📊 ResNet152-L34Fuse-GeM-SubCenter Params: {total / 1e6:.2f}M")
+        print(f"📊 ResNet152-L34Fuse-GeM-GatedFusion-SubCenter Params: {total / 1e6:.2f}M")
         return total < 100_000_000
