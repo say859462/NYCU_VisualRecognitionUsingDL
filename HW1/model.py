@@ -191,42 +191,66 @@ class ImageClassificationModel(nn.Module):
         if stage not in (1, 2):
             raise ValueError("stage should be 1 or 2")
 
-        # stage 1: train deeper backbone
-        # stage 2: freeze more backbone, focus on head calibration
-        for param in self.layer2.parameters():
-            param.requires_grad = (stage == 1)
-        for param in self.layer3.parameters():
-            param.requires_grad = (stage == 1)
-        for param in self.layer4.parameters():
-            param.requires_grad = True
-
-        for module in [
-            self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.cross_attn, self.embedding, self.classifier
-        ]:
-            for param in module.parameters():
+        if stage == 1:
+            # backbone
+            for param in self.layer2.parameters():
+                param.requires_grad = True
+            for param in self.layer3.parameters():
+                param.requires_grad = True
+            for param in self.layer4.parameters():
                 param.requires_grad = True
 
-        # cls token is standalone parameter
-        self.cls_token.requires_grad = True
+            # fusion / attention / head
+            for module in [
+                self.proj_l3, self.proj_l4, self.fuse,
+                self.pool, self.cross_attn, self.embedding, self.classifier
+            ]:
+                for param in module.parameters():
+                    param.requires_grad = True
+
+            self.cls_token.requires_grad = True
+
+        else:  # stage == 2
+            # 完全凍結 backbone 與 fusion / attention
+            for param in self.layer2.parameters():
+                param.requires_grad = False
+            for param in self.layer3.parameters():
+                param.requires_grad = False
+            for param in self.layer4.parameters():
+                param.requires_grad = False
+
+            for module in [self.proj_l3, self.proj_l4, self.fuse, self.pool, self.cross_attn]:
+                for param in module.parameters():
+                    param.requires_grad = False
+
+            self.cls_token.requires_grad = False
+
+            # 只保留 classifier head
+            for param in self.embedding.parameters():
+                param.requires_grad = True
+            for param in self.classifier.parameters():
+                param.requires_grad = True
 
     def _head_parameters(self):
         params = []
-        for module in [
-            self.proj_l3, self.proj_l4, self.fuse,
-            self.pool, self.cross_attn, self.embedding, self.classifier
-        ]:
-            params.extend([p for p in module.parameters() if p.requires_grad])
 
-        if self.cls_token.requires_grad:
-            params.append(self.cls_token)
+        for module in [self.embedding, self.classifier]:
+            params.extend([p for p in module.parameters() if p.requires_grad])
 
         return params
 
     def get_parameter_groups(self, lr_base, stage):
-        head_params = self._head_parameters()
-
         if stage == 1:
+            head_params = []
+            for module in [
+                self.proj_l3, self.proj_l4, self.fuse,
+                self.pool, self.cross_attn, self.embedding, self.classifier
+            ]:
+                head_params.extend([p for p in module.parameters() if p.requires_grad])
+
+            if self.cls_token.requires_grad:
+                head_params.append(self.cls_token)
+
             return [
                 {
                     "params": [p for p in self.layer2.parameters() if p.requires_grad],
@@ -246,15 +270,13 @@ class ImageClassificationModel(nn.Module):
                 },
             ]
 
+        # stage 2: head-only
+        head_params = self._head_parameters()
         return [
             {
-                "params": [p for p in self.layer4.parameters() if p.requires_grad],
-                "lr": lr_base * 0.05,
-            },
-            {
                 "params": head_params,
-                "lr": lr_base * 0.5,
-            },
+                "lr": lr_base,
+            }
         ]
 
     # =========================
