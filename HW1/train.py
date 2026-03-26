@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from utils import make_background_suppressed_views
 
 
 def _build_box_from_peak(cy, cx, crop_h, crop_w, H, W):
@@ -168,18 +167,14 @@ def train_one_epoch(
     device,
     scaler,
 
-    stage_b_start_epoch=9,
+    stage_b_start_epoch=10,
 
     stage_a_full_loss_weight=1.0,
-    stage_a_bg_aux_weight=0.15,
-    stage_a_bg_threshold=0.45,
-    stage_a_bg_suppress_strength=0.35,
-    stage_a_bg_blur_kernel=7,
     stage_a_proto_diversity_weight=0.0,
 
     stage_b_fused_loss_weight=1.0,
     stage_b_full_loss_weight=0.5,
-    stage_b_local_loss_weight=0.1,
+    stage_b_local_loss_weight=0.05,
     stage_b_proto_diversity_weight=0.0,
 
     local_crop_threshold=0.55,
@@ -208,21 +203,10 @@ def train_one_epoch(
 
         with torch.amp.autocast('cuda', enabled=use_amp):
             if not in_stage_b:
-                # Stage A: full/global attention backbone
+                # Stage A: only full/global backbone
                 full_logits = model(images)
-                loss = stage_a_full_loss_weight * criterion(full_logits, labels)
 
-                if stage_a_bg_aux_weight > 0:
-                    attn_map = model.get_cross_attention_map(images)
-                    bg_views = make_background_suppressed_views(
-                        images,
-                        attn_map,
-                        threshold_ratio=stage_a_bg_threshold,
-                        suppress_strength=stage_a_bg_suppress_strength,
-                        blur_kernel=stage_a_bg_blur_kernel
-                    )
-                    bg_logits = model(bg_views)
-                    loss = loss + stage_a_bg_aux_weight * criterion(bg_logits, labels)
+                loss = stage_a_full_loss_weight * criterion(full_logits, labels)
 
                 if stage_a_proto_diversity_weight > 0:
                     loss = loss + stage_a_proto_diversity_weight * model.prototype_diversity_loss()

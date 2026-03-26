@@ -82,7 +82,7 @@ def main():
         './Model_Weight/best_full_stageA_model.pth'
     )
 
-    stage_b_start_epoch = config.get('stage_b_start_epoch', 9)
+    stage_b_start_epoch = config.get('stage_b_start_epoch', 10)
 
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
@@ -232,8 +232,7 @@ def main():
             print(f"\n--- Epoch {current_epoch}/{num_epochs} ---")
             if not in_stage_b:
                 print(
-                    "Stage A | CE(full) + background suppression aux + "
-                    "CLS Cross-Attention full/global backbone"
+                    "Stage A | CE(full) only + CLS Cross-Attention full/global backbone"
                 )
             else:
                 print(
@@ -250,16 +249,10 @@ def main():
                 device=device,
                 scaler=scaler,
 
-                stage_b_start_epoch=config.get('stage_b_start_epoch', 9),
+                stage_b_start_epoch=config.get('stage_b_start_epoch', 10),
 
                 stage_a_full_loss_weight=config.get(
                     'stage_a_full_loss_weight', 1.0),
-                stage_a_bg_aux_weight=config.get(
-                    'stage_a_bg_aux_weight', 0.15),
-                stage_a_bg_threshold=config.get('stage_a_bg_threshold', 0.45),
-                stage_a_bg_suppress_strength=config.get(
-                    'stage_a_bg_suppress_strength', 0.35),
-                stage_a_bg_blur_kernel=config.get('stage_a_bg_blur_kernel', 7),
                 stage_a_proto_diversity_weight=config.get(
                     'stage_a_proto_diversity_weight', 0.0),
 
@@ -268,7 +261,7 @@ def main():
                 stage_b_full_loss_weight=config.get(
                     'stage_b_full_loss_weight', 0.5),
                 stage_b_local_loss_weight=config.get(
-                    'stage_b_local_loss_weight', 0.1),
+                    'stage_b_local_loss_weight', 0.05),
                 stage_b_proto_diversity_weight=config.get(
                     'stage_b_proto_diversity_weight', 0.0),
 

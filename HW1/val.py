@@ -16,7 +16,7 @@ def validate_one_epoch(model, val_loader, criterion, device, config, current_epo
     all_predictions = []
     all_targets = []
 
-    stage_b_start_epoch = config.get("stage_b_start_epoch", 9)
+    stage_b_start_epoch = config.get("stage_b_start_epoch", 10)
     in_stage_b = current_epoch >= stage_b_start_epoch
 
     pbar = tqdm(val_loader, desc="Validating", leave=False, colour="green")
