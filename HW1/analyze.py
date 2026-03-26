@@ -280,7 +280,7 @@ def main():
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_StagedLocalCrop_best_loss_67th")
+                        default="./Plot/Analysis_StagedLocalCrop_best_loss_68th")
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--max_visualizations", type=int, default=80)
     parser.add_argument("--hard_pair_topk", type=int, default=20)

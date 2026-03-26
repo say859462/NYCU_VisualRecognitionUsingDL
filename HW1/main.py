@@ -72,7 +72,7 @@ def main():
     early_stopping_patience = config.get('early_stopping_patience', 10)
     num_classes = config['num_classes']
     data_dir = config['data_dir']
-    resume_training = config['resume_training']
+    resume_training = config.get('resume_training', False)
 
     checkpoint_path = config['checkpoint_path']
     best_model_path = config['best_model_path']
@@ -189,7 +189,7 @@ def main():
         )
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
-        best_val_acc = checkpoint['best_val_acc']
+        best_val_acc = checkpoint.get('best_val_acc', 0.0)
         best_val_loss_for_acc = checkpoint.get(
             'best_val_loss_for_acc', float('inf'))
         best_val_loss_only = checkpoint.get('best_val_loss_only', float('inf'))
@@ -227,10 +227,8 @@ def main():
                 optimizer=optimizer,
                 device=device,
                 scaler=scaler,
-
                 local1_view_weight=local1_view_weight,
                 proto_diversity_weight=proto_diversity_weight,
-
                 local_crop_threshold=config.get('local_crop_threshold', 0.55),
                 local_crop_padding_ratio=config.get(
                     'local_crop_padding_ratio', 0.12),

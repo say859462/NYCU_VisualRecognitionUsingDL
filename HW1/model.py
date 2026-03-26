@@ -142,7 +142,7 @@ class ImageClassificationModel(nn.Module):
 
         self.pool = GeM(p=3.0, learn_p=True)
 
-        self.token_pool = nn.AdaptiveAvgPool2d((4, 4))
+        self.token_pool = nn.AdaptiveAvgPool2d((7, 7))
         self.cls_token = nn.Parameter(torch.randn(1, 1, 512))
         self.cross_attn = CrossAttentionBlock(
             dim=512, num_heads=4, mlp_ratio=4.0, dropout=0.1
@@ -300,7 +300,7 @@ class ImageClassificationModel(nn.Module):
         with torch.no_grad():
             _, attn_weights = self.forward_with_attention(x)
             attn_map = attn_weights.mean(dim=1)
-            attn_map = attn_map.view(attn_map.size(0), 1, 4, 4)
+            attn_map = attn_map.view(attn_map.size(0), 1, 7, 7)
         self.train(is_training)
         return attn_map
 
