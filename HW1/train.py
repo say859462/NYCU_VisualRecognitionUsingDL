@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+from utils import make_background_suppressed_views
 
 
 def _build_box_from_peak(cy, cx, crop_h, crop_w, H, W):
@@ -30,11 +31,15 @@ def _expand_with_padding(y1, y2, x1, x2, H, W, padding_ratio):
     return y1, y2, x1, x2
 
 
-def _clamp_box_size(y1, y2, x1, x2, H, W, min_crop_h, min_crop_w, max_crop_h, max_crop_w):
+def _clamp_box_size(
+    y1, y2, x1, x2,
+    H, W,
+    min_crop_h, min_crop_w,
+    max_crop_h, max_crop_w
+):
     box_h = y2 - y1
     box_w = x2 - x1
 
-    # too small -> expand around center
     if box_h < min_crop_h:
         cy = (y1 + y2) // 2
         y1 = max(0, cy - min_crop_h // 2)
@@ -47,7 +52,6 @@ def _clamp_box_size(y1, y2, x1, x2, H, W, min_crop_h, min_crop_w, max_crop_h, ma
         x2 = min(W, x1 + min_crop_w)
         x1 = max(0, x2 - min_crop_w)
 
-    # too large -> shrink around center
     box_h = y2 - y1
     box_w = x2 - x1
 
@@ -75,16 +79,6 @@ def generate_cross_attention_bbox_local_view(
     max_crop_ratio=0.75,
     fallback_crop_ratio=0.40,
 ):
-    """
-    Cross-attention threshold-mask -> bounding box crop
-    1) get_cross_attention_map()
-    2) upsample to image size
-    3) normalize per sample
-    4) mask = attn >= threshold * max(attn)
-    5) bbox from all positive pixels
-    6) padding
-    7) if too small / too large / empty -> fallback peak-centered crop
-    """
     with torch.no_grad():
         attn_map = model.get_cross_attention_map(images)   # [B,1,4,4]
         attn_map = F.interpolate(
@@ -92,12 +86,11 @@ def generate_cross_attention_bbox_local_view(
             size=images.shape[-2:],
             mode='bilinear',
             align_corners=False
-        )  # [B,1,H,W]
+        )
 
     B, _, H, W = attn_map.shape
     device = images.device
 
-    # per-sample normalize
     attn_min = attn_map.amin(dim=(2, 3), keepdim=True)
     attn_max = attn_map.amax(dim=(2, 3), keepdim=True)
     norm_map = (attn_map - attn_min) / (attn_max - attn_min + 1e-8)
@@ -112,7 +105,7 @@ def generate_cross_attention_bbox_local_view(
     local_list = []
 
     for b in range(B):
-        single_map = norm_map[b, 0]  # [H,W]
+        single_map = norm_map[b, 0]
         peak_val = single_map.max()
         mask = single_map >= (peak_val * threshold_ratio)
 
@@ -145,7 +138,6 @@ def generate_cross_attention_bbox_local_view(
                 max_crop_h, max_crop_w
             )
 
-            # safety fallback: if box still degenerate
             if (y2 - y1) < 2 or (x2 - x1) < 2:
                 flat_idx = torch.argmax(single_map.view(-1)).item()
                 cy = flat_idx // W
@@ -175,12 +167,27 @@ def train_one_epoch(
     optimizer,
     device,
     scaler,
-    local1_view_weight=0.10,
+
+    stage_b_start_epoch=9,
+
+    stage_a_full_loss_weight=1.0,
+    stage_a_bg_aux_weight=0.15,
+    stage_a_bg_threshold=0.45,
+    stage_a_bg_suppress_strength=0.35,
+    stage_a_bg_blur_kernel=7,
+    stage_a_proto_diversity_weight=0.0,
+
+    stage_b_fused_loss_weight=1.0,
+    stage_b_full_loss_weight=0.5,
+    stage_b_local_loss_weight=0.1,
+    stage_b_proto_diversity_weight=0.0,
+
     local_crop_threshold=0.55,
     local_crop_padding_ratio=0.12,
     local_min_crop_ratio=0.20,
     local_max_crop_ratio=0.75,
     local_fallback_crop_ratio=0.40,
+
     max_grad_norm=5.0,
 ):
     model.train()
@@ -189,6 +196,7 @@ def train_one_epoch(
     correct = 0
     total = 0
 
+    in_stage_b = epoch >= stage_b_start_epoch
     pbar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False)
 
     for images, labels in pbar:
@@ -196,27 +204,60 @@ def train_one_epoch(
         labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-
-        local1_images = generate_cross_attention_bbox_local_view(
-            model=model,
-            images=images,
-            threshold_ratio=local_crop_threshold,
-            padding_ratio=local_crop_padding_ratio,
-            min_crop_ratio=local_min_crop_ratio,
-            max_crop_ratio=local_max_crop_ratio,
-            fallback_crop_ratio=local_fallback_crop_ratio,
-        )
-
         use_amp = (device.type == 'cuda')
+
         with torch.amp.autocast('cuda', enabled=use_amp):
-            outputs = model.forward_full_local(images, local1_images)
-            fused_logits = outputs["fused_logits"]
-            local1_logits = outputs["local1_logits"]
+            if not in_stage_b:
+                # Stage A: full/global attention backbone
+                full_logits = model(images)
+                loss = stage_a_full_loss_weight * criterion(full_logits, labels)
 
-            loss = criterion(fused_logits, labels)
+                if stage_a_bg_aux_weight > 0:
+                    attn_map = model.get_cross_attention_map(images)
+                    bg_views = make_background_suppressed_views(
+                        images,
+                        attn_map,
+                        threshold_ratio=stage_a_bg_threshold,
+                        suppress_strength=stage_a_bg_suppress_strength,
+                        blur_kernel=stage_a_bg_blur_kernel
+                    )
+                    bg_logits = model(bg_views)
+                    loss = loss + stage_a_bg_aux_weight * criterion(bg_logits, labels)
 
-            if local1_view_weight > 0:
-                loss = loss + local1_view_weight * criterion(local1_logits, labels)
+                if stage_a_proto_diversity_weight > 0:
+                    loss = loss + stage_a_proto_diversity_weight * model.prototype_diversity_loss()
+
+                preds = torch.argmax(full_logits, dim=1)
+
+            else:
+                # Stage B: late local refinement
+                local1_images = generate_cross_attention_bbox_local_view(
+                    model=model,
+                    images=images,
+                    threshold_ratio=local_crop_threshold,
+                    padding_ratio=local_crop_padding_ratio,
+                    min_crop_ratio=local_min_crop_ratio,
+                    max_crop_ratio=local_max_crop_ratio,
+                    fallback_crop_ratio=local_fallback_crop_ratio,
+                )
+
+                outputs = model.forward_full_local(images, local1_images)
+                fused_logits = outputs["fused_logits"]
+                full_logits = outputs["full_logits"]
+                local1_logits = outputs["local1_logits"]
+
+                loss = stage_b_fused_loss_weight * criterion(fused_logits, labels)
+
+                if stage_b_full_loss_weight > 0:
+                    loss = loss + stage_b_full_loss_weight * criterion(full_logits, labels)
+
+                if stage_b_local_loss_weight > 0:
+                    loss = loss + stage_b_local_loss_weight * criterion(local1_logits, labels)
+
+                if stage_b_proto_diversity_weight > 0:
+                    loss = loss + stage_b_proto_diversity_weight * model.prototype_diversity_loss()
+
+                preds = torch.argmax(fused_logits, dim=1)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -225,13 +266,13 @@ def train_one_epoch(
         scaler.update()
 
         running_loss += loss.item() * images.size(0)
-        preds = torch.argmax(fused_logits, dim=1)
         correct += torch.sum(preds == labels).item()
         total += labels.size(0)
 
         pbar.set_postfix({
             "loss": f"{loss.item():.4f}",
             "acc": f"{(correct / total) * 100:.2f}%",
+            "stage": "B" if in_stage_b else "A"
         })
 
     return running_loss / total, (correct / total) * 100

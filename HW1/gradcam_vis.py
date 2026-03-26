@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--model_path', type=str,
                         default='./Model_Weight/best_model.pth')
     parser.add_argument('--save_dir', type=str,
-                        default='./Plot/Attention_Outputs/62th')
+                        default='./Plot/Attention_Outputs/65th')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:

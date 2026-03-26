@@ -4,19 +4,35 @@
   "learning_rate": 8e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
+
   "checkpoint_path": "./Model_Weight/checkpoint.pth",
   "best_model_path": "./Model_Weight/best_model.pth",
   "best_loss_model_path": "./Model_Weight/best_loss_model.pth",
+  "best_full_model_path": "./Model_Weight/best_full_stageA_model.pth",
+
   "resume_training": false,
   "early_stopping_patience": 30,
+
   "num_subcenters": 3,
   "embed_dim": 256,
 
-  "local1_view_weight": 0.1,
+  "stage_b_start_epoch": 9,
+
+  "stage_a_full_loss_weight": 1.0,
+  "stage_a_bg_aux_weight": 0.15,
+  "stage_a_bg_threshold": 0.45,
+  "stage_a_bg_suppress_strength": 0.35,
+  "stage_a_bg_blur_kernel": 7,
+  "stage_a_proto_diversity_weight": 0.0,
+
+  "stage_b_fused_loss_weight": 1.0,
+  "stage_b_full_loss_weight": 0.5,
+  "stage_b_local_loss_weight": 0.1,
+  "stage_b_proto_diversity_weight": 0.0,
 
   "local_crop_threshold": 0.55,
   "local_crop_padding_ratio": 0.12,
-  "local_min_crop_ratio": 0.2,
+  "local_min_crop_ratio": 0.20,
   "local_max_crop_ratio": 0.75,
-  "local_fallback_crop_ratio": 0.4
+  "local_fallback_crop_ratio": 0.40
 }

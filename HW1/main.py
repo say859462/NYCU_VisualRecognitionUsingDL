@@ -73,22 +73,19 @@ def main():
     num_classes = config['num_classes']
     data_dir = config['data_dir']
     resume_training = config['resume_training']
+
     checkpoint_path = config['checkpoint_path']
     best_model_path = config['best_model_path']
-    best_loss_model_path = config.get(
-        'best_loss_model_path',
-        './Model_Weight/best_loss_model.pth'
+    best_loss_model_path = config['best_loss_model_path']
+    best_full_model_path = config.get(
+        'best_full_model_path',
+        './Model_Weight/best_full_stageA_model.pth'
     )
+
+    stage_b_start_epoch = config.get('stage_b_start_epoch', 9)
 
     num_subcenters = config.get('num_subcenters', 3)
     embed_dim = config.get('embed_dim', 256)
-
-    local1_view_weight = config.get('local1_view_weight', 0.10)
-    local_crop_threshold = config.get('local_crop_threshold', 0.55)
-    local_crop_padding_ratio = config.get('local_crop_padding_ratio', 0.12)
-    local_min_crop_ratio = config.get('local_min_crop_ratio', 0.20)
-    local_max_crop_ratio = config.get('local_max_crop_ratio', 0.75)
-    local_fallback_crop_ratio = config.get('local_fallback_crop_ratio', 0.40)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -177,14 +174,22 @@ def main():
 
     start_epoch = 0
     epochs_no_improve = 0
-    best_val_acc = 0.0
-    best_val_loss_for_acc = float('inf')
-    best_val_loss_only = float('inf')
+
+    best_stage_a_acc = 0.0
+    best_stage_a_loss = float('inf')
+
+    best_stage_b_acc = 0.0
+    best_stage_b_loss_for_acc = float('inf')
+    best_stage_b_loss_only = float('inf')
+
     history = {
         'train_loss': [],
         'val_loss': [],
         'train_acc': [],
-        'val_acc': []
+        'val_acc': [],
+        'full_val_acc': [],
+        'local_val_acc': [],
+        'fused_val_acc': []
     }
     best_val_preds, best_val_labels = [], []
 
@@ -194,17 +199,20 @@ def main():
         )
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
-        best_val_acc = checkpoint['best_val_acc']
+
+        best_stage_a_acc = checkpoint.get('best_stage_a_acc', 0.0)
+        best_stage_a_loss = checkpoint.get('best_stage_a_loss', float('inf'))
+
+        best_stage_b_acc = checkpoint.get('best_stage_b_acc', 0.0)
+        best_stage_b_loss_for_acc = checkpoint.get(
+            'best_stage_b_loss_for_acc', float('inf'))
+        best_stage_b_loss_only = checkpoint.get(
+            'best_stage_b_loss_only', float('inf'))
+
         history = checkpoint['history']
         epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
         best_val_preds = checkpoint.get('best_val_preds', [])
         best_val_labels = checkpoint.get('best_val_labels', [])
-        best_val_loss_for_acc = checkpoint.get(
-            'best_val_loss_for_acc', float('inf')
-        )
-        best_val_loss_only = checkpoint.get(
-            'best_val_loss_only', float('inf')
-        )
 
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'scheduler_state_dict' in checkpoint:
@@ -218,30 +226,63 @@ def main():
 
     try:
         for epoch in range(start_epoch, num_epochs):
-            print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
-            print(
-                "CE(fused) + cross-attention threshold bbox top-1 local crop + "
-                "10~15% padding + CLS Cross-Attention fusion over full + local1"
-            )
+            current_epoch = epoch + 1
+            in_stage_b = current_epoch >= stage_b_start_epoch
+
+            print(f"\n--- Epoch {current_epoch}/{num_epochs} ---")
+            if not in_stage_b:
+                print(
+                    "Stage A | CE(full) + background suppression aux + "
+                    "CLS Cross-Attention full/global backbone"
+                )
+            else:
+                print(
+                    "Stage B | CE(fused) + lambda_full*CE(full) + "
+                    "lambda_local*CE(local) + cross-attention bbox local crop"
+                )
 
             train_loss, train_acc = train_one_epoch(
                 model=model,
                 train_loader=train_loader,
                 criterion=criterion_train,
-                epoch=epoch + 1,
+                epoch=current_epoch,
                 optimizer=optimizer,
                 device=device,
                 scaler=scaler,
-                local1_view_weight=local1_view_weight,
-                local_crop_threshold=local_crop_threshold,
-                local_crop_padding_ratio=local_crop_padding_ratio,
-                local_min_crop_ratio=local_min_crop_ratio,
-                local_max_crop_ratio=local_max_crop_ratio,
-                local_fallback_crop_ratio=local_fallback_crop_ratio,
+
+                stage_b_start_epoch=config.get('stage_b_start_epoch', 9),
+
+                stage_a_full_loss_weight=config.get(
+                    'stage_a_full_loss_weight', 1.0),
+                stage_a_bg_aux_weight=config.get(
+                    'stage_a_bg_aux_weight', 0.15),
+                stage_a_bg_threshold=config.get('stage_a_bg_threshold', 0.45),
+                stage_a_bg_suppress_strength=config.get(
+                    'stage_a_bg_suppress_strength', 0.35),
+                stage_a_bg_blur_kernel=config.get('stage_a_bg_blur_kernel', 7),
+                stage_a_proto_diversity_weight=config.get(
+                    'stage_a_proto_diversity_weight', 0.0),
+
+                stage_b_fused_loss_weight=config.get(
+                    'stage_b_fused_loss_weight', 1.0),
+                stage_b_full_loss_weight=config.get(
+                    'stage_b_full_loss_weight', 0.5),
+                stage_b_local_loss_weight=config.get(
+                    'stage_b_local_loss_weight', 0.1),
+                stage_b_proto_diversity_weight=config.get(
+                    'stage_b_proto_diversity_weight', 0.0),
+
+                local_crop_threshold=config.get('local_crop_threshold', 0.55),
+                local_crop_padding_ratio=config.get(
+                    'local_crop_padding_ratio', 0.12),
+                local_min_crop_ratio=config.get('local_min_crop_ratio', 0.20),
+                local_max_crop_ratio=config.get('local_max_crop_ratio', 0.75),
+                local_fallback_crop_ratio=config.get(
+                    'local_fallback_crop_ratio', 0.40),
             )
 
-            val_loss, val_acc, val_preds, val_labels = validate_one_epoch(
-                model, val_loader, criterion_val, device, config
+            val_loss, val_acc, val_preds, val_labels, metrics = validate_one_epoch(
+                model, val_loader, criterion_val, device, config, current_epoch
             )
 
             scheduler.step()
@@ -250,57 +291,91 @@ def main():
             history['train_acc'].append(train_acc)
             history['val_loss'].append(val_loss)
             history['val_acc'].append(val_acc)
-
-            print(
-                f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
-                f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
-                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
+            history['full_val_acc'].append(metrics["full_acc"])
+            history['local_val_acc'].append(
+                0.0 if metrics["local_acc"] is None else metrics["local_acc"]
+            )
+            history['fused_val_acc'].append(
+                0.0 if metrics["fused_acc"] is None else metrics["fused_acc"]
             )
 
-            improved = False
-
-            if val_acc > best_val_acc or (
-                val_acc == best_val_acc and val_loss < best_val_loss_for_acc
-            ):
-                best_val_acc = val_acc
-                best_val_loss_for_acc = val_loss
-                best_val_preds = val_preds
-                best_val_labels = val_labels
-                improved = True
-
-                torch.save(model.state_dict(), best_model_path)
-                print(f"🌟 Best ACC model saved ({best_val_acc:.2f}%)")
-
-            if val_loss < best_val_loss_only:
-                best_val_loss_only = val_loss
-                improved = True
-
-                torch.save(model.state_dict(), best_loss_model_path)
-                print(f"💡 Best LOSS model saved ({best_val_loss_only:.4f})")
-
-            if improved:
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
+            if not in_stage_b:
                 print(
-                    f"No improvement! {epochs_no_improve}/{early_stopping_patience}"
+                    f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
+                    f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
+                    f"Val Loss(full): {val_loss:.4f} | Val Acc(full): {metrics['full_acc']:.2f}%"
                 )
+
+                if metrics["full_acc"] > best_stage_a_acc or (
+                    metrics["full_acc"] == best_stage_a_acc and val_loss < best_stage_a_loss
+                ):
+                    best_stage_a_acc = metrics["full_acc"]
+                    best_stage_a_loss = val_loss
+                    torch.save(model.state_dict(), best_full_model_path)
+                    print(
+                        f"🌟 Best Stage-A FULL model saved ({best_stage_a_acc:.2f}%)")
+
+            else:
+                print(
+                    f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
+                    f"Train Loss: {train_loss:.4f} | Train Acc(fused): {train_acc:.2f}% | "
+                    f"Val Loss(fused): {val_loss:.4f} | "
+                    f"Val Full: {metrics['full_acc']:.2f}% | "
+                    f"Val Local: {metrics['local_acc']:.2f}% | "
+                    f"Val Fused: {metrics['fused_acc']:.2f}%"
+                )
+
+                improved = False
+
+                if metrics["fused_acc"] > best_stage_b_acc or (
+                    metrics["fused_acc"] == best_stage_b_acc and val_loss < best_stage_b_loss_for_acc
+                ):
+                    best_stage_b_acc = metrics["fused_acc"]
+                    best_stage_b_loss_for_acc = val_loss
+                    best_val_preds = val_preds
+                    best_val_labels = val_labels
+                    improved = True
+
+                    torch.save(model.state_dict(), best_model_path)
+                    print(
+                        f"🌟 Best Stage-B FUSED model saved ({best_stage_b_acc:.2f}%)")
+
+                if val_loss < best_stage_b_loss_only:
+                    best_stage_b_loss_only = val_loss
+                    improved = True
+
+                    torch.save(model.state_dict(), best_loss_model_path)
+                    print(
+                        f"💡 Best Stage-B LOSS model saved ({best_stage_b_loss_only:.4f})")
+
+                if improved:
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    print(
+                        f"No improvement! {epochs_no_improve}/{early_stopping_patience}"
+                    )
 
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'best_val_acc': best_val_acc,
-                'best_val_loss_for_acc': best_val_loss_for_acc,
-                'best_val_loss_only': best_val_loss_only,
+
+                'best_stage_a_acc': best_stage_a_acc,
+                'best_stage_a_loss': best_stage_a_loss,
+
+                'best_stage_b_acc': best_stage_b_acc,
+                'best_stage_b_loss_for_acc': best_stage_b_loss_for_acc,
+                'best_stage_b_loss_only': best_stage_b_loss_only,
+
                 'history': history,
                 'epochs_no_improve': epochs_no_improve,
                 'best_val_preds': best_val_preds,
                 'best_val_labels': best_val_labels
             }, checkpoint_path)
 
-            if epochs_no_improve >= early_stopping_patience:
+            if in_stage_b and epochs_no_improve >= early_stopping_patience:
                 break
 
     except KeyboardInterrupt:
@@ -336,7 +411,9 @@ def main():
             )
 
     print(
-        f"\n✅ Training Completed. Best Val Acc: {best_val_acc:.2f}% | "
+        f"\n✅ Training Completed. "
+        f"Best Stage-A Full Acc: {best_stage_a_acc:.2f}% | "
+        f"Best Stage-B Fused Acc: {best_stage_b_acc:.2f}% | "
         f"Total Time: {int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
     )
 

@@ -15,13 +15,13 @@ from train import generate_cross_attention_bbox_local_view
 def main():
     parser = argparse.ArgumentParser(description="Final Inference")
     parser.add_argument('--config', type=str, default='./config.json')
-    parser.add_argument('--model_path', type=str,
-                        default='./Model_Weight/best_model.pth')
+    parser.add_argument('--model_path', type=str, default=None)
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
         config = json.load(f)
 
+    model_path = args.model_path if args.model_path is not None else config['best_model_path']
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     test_transform = transforms.Compose([
@@ -49,11 +49,11 @@ def main():
         embed_dim=config.get('embed_dim', 256)
     ).to(device)
 
-    model.load_state_dict(torch.load(args.model_path, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
     all_predictions = []
-    print("🚀 Running Final Inference...")
+    print(f"🚀 Running Final Inference from: {model_path}")
 
     with torch.no_grad():
         for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):

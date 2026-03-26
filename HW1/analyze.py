@@ -75,8 +75,8 @@ def run_analysis(
         )
 
         full_logits = model(images)
-
         outputs = model.forward_full_local(images, local_images)
+
         fused_logits = outputs["fused_logits"]
         local_logits = outputs["local1_logits"]
 
@@ -160,14 +160,16 @@ def run_analysis(
 
                 plt.tight_layout()
                 plt.savefig(
-                    os.path.join(vis_dir, f"sample_{vis_count:04d}_true_{y}.png"),
+                    os.path.join(
+                        vis_dir, f"sample_{vis_count:04d}_true_{y}.png"),
                     dpi=200
                 )
                 plt.close(fig)
                 vis_count += 1
 
     df = pd.DataFrame(records)
-    df.to_csv(os.path.join(save_dir, "full_local_fused_predictions.csv"), index=False)
+    df.to_csv(os.path.join(
+        save_dir, "full_local_fused_predictions.csv"), index=False)
 
     summary = {}
     summary["num_samples"] = len(df)
@@ -211,11 +213,16 @@ def run_analysis(
 
     fused_error_df = df[df["fused_correct"] == 0].copy()
     if len(fused_error_df) > 0:
-        summary["mean_fused_error_conf"] = float(fused_error_df["fused_conf"].mean())
-        summary["median_fused_error_conf"] = float(fused_error_df["fused_conf"].median())
-        summary["mean_fused_error_top2_prob"] = float(fused_error_df["fused_top2_prob"].mean())
-        summary["high_conf_wrong_count_ge_0.9"] = int((fused_error_df["fused_conf"] >= 0.9).sum())
-        summary["high_conf_wrong_count_ge_0.8"] = int((fused_error_df["fused_conf"] >= 0.8).sum())
+        summary["mean_fused_error_conf"] = float(
+            fused_error_df["fused_conf"].mean())
+        summary["median_fused_error_conf"] = float(
+            fused_error_df["fused_conf"].median())
+        summary["mean_fused_error_top2_prob"] = float(
+            fused_error_df["fused_top2_prob"].mean())
+        summary["high_conf_wrong_count_ge_0.9"] = int(
+            (fused_error_df["fused_conf"] >= 0.9).sum())
+        summary["high_conf_wrong_count_ge_0.8"] = int(
+            (fused_error_df["fused_conf"] >= 0.8).sum())
     else:
         summary["mean_fused_error_conf"] = None
         summary["median_fused_error_conf"] = None
@@ -244,7 +251,8 @@ def run_analysis(
         })
 
     hard_df = pd.DataFrame(hard_pair_rows)
-    hard_df.to_csv(os.path.join(save_dir, "hard_pairs_confidence.csv"), index=False)
+    hard_df.to_csv(os.path.join(
+        save_dir, "hard_pairs_confidence.csv"), index=False)
 
     with open(os.path.join(save_dir, "analysis_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
@@ -267,12 +275,13 @@ def run_analysis(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analyze full / local / fused behavior under cross-attention bbox crop"
+        description="Analyze full / local / fused behavior under staged training"
     )
     parser.add_argument("--config", type=str, default="./config.json")
-    parser.add_argument("--model_path", type=str, default="./Model_Weight/63th/best_model.pth")
-    parser.add_argument("--save_dir", type=str, default="./Plot/Analysis_CrossAttnBBox_62th")
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--model_path", type=str, default=None)
+    parser.add_argument("--save_dir", type=str,
+                        default="./Plot/Analysis_StagedLocalCrop_65th")
+    parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--max_visualizations", type=int, default=80)
     parser.add_argument("--hard_pair_topk", type=int, default=20)
     args = parser.parse_args()
@@ -281,6 +290,7 @@ def main():
         config = json.load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_path = args.model_path if args.model_path is not None else config["best_model_path"]
 
     val_transform = transforms.Compose([
         transforms.Resize(512),
@@ -315,7 +325,7 @@ def main():
         embed_dim=config.get("embed_dim", 256)
     ).to(device)
 
-    state_dict = torch.load(args.model_path, map_location=device)
+    state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -329,7 +339,7 @@ def main():
         hard_pair_topk=args.hard_pair_topk,
     )
 
-    print("\n===== Analysis Summary =====")
+    print(f"\n===== Analysis Summary ({model_path}) =====")
     for k, v in summary.items():
         print(f"{k}: {v}")
 
