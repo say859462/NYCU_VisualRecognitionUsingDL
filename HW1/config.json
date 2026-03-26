@@ -1,6 +1,6 @@
 {
   "batch_size": 32,
-  "num_epochs": 25,
+  "num_epochs": 30,
   "learning_rate": 8e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
@@ -12,7 +12,7 @@
   "num_subcenters": 3,
   "embed_dim": 256,
   "local1_view_weight": 0.0,
-  "proto_diversity_weight": 0.0,
+  "proto_diversity_weight": 0.005,
   "local_crop_threshold": 0.45,
   "local_crop_padding_ratio": 0.18,
   "local_min_crop_ratio": 0.3,

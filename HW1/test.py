@@ -30,8 +30,10 @@ def main():
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    test_dataset = ImageDataset(root_dir=config['data_dir'], split="test", transform=test_transform)
-    test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4, pin_memory=True)
+    test_dataset = ImageDataset(
+        root_dir=config['data_dir'], split="test", transform=test_transform)
+    test_loader = DataLoader(
+        test_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4, pin_memory=True)
 
     model = ImageClassificationModel(
         num_classes=config['num_classes'],
@@ -46,17 +48,32 @@ def main():
     all_predictions = []
     print(f"🚀 Running Final Inference from: {model_path}")
 
-    with torch.no_grad():
-        for images, _ in tqdm(test_loader, desc="Testing", colour="yellow"):
-            images = images.to(device, non_blocking=True)
-            outputs = model.forward_pmg(images)
-            logits = outputs["concat_logits"]
-            avg_probs = F.softmax(logits, dim=1)
-            _, preds = torch.max(avg_probs, 1)
-            all_predictions.extend(preds.cpu().numpy())
+    import cv2
+    import torch.nn.functional as F
 
-    image_names = [os.path.splitext(os.path.basename(p))[0] for p in test_dataset.image_paths]
-    submission_df = pd.DataFrame({'image_name': image_names, 'pred_label': all_predictions})
+    with torch.no_grad():
+        outputs = model.forward_pmg(input_tensor)
+        global_probs = torch.softmax(outputs['global_logits'], dim=1)[0]
+        part2_probs = torch.softmax(outputs['part2_logits'], dim=1)[0]
+        part4_probs = torch.softmax(outputs['part4_logits'], dim=1)[0]
+        concat_probs = torch.softmax(outputs['concat_logits'], dim=1)[0]
+
+        saliency = model.get_saliency(input_tensor)  # [B,H,W] or [B,1,H,W]
+        if saliency.dim() == 4:
+            saliency = saliency[:, 0]
+        saliency = saliency[0].cpu().numpy()
+
+    saliency = (saliency - saliency.min()) / \
+        (saliency.max() - saliency.min() + 1e-8)
+    saliency = cv2.resize(saliency, (448, 448), interpolation=cv2.INTER_CUBIC)
+    saliency = cv2.GaussianBlur(saliency, (0, 0), sigmaX=8, sigmaY=8)
+    saliency = (saliency - saliency.min()) / \
+        (saliency.max() - saliency.min() + 1e-8)
+
+    image_names = [os.path.splitext(os.path.basename(p))[0]
+                   for p in test_dataset.image_paths]
+    submission_df = pd.DataFrame(
+        {'image_name': image_names, 'pred_label': all_predictions})
     submission_df.to_csv("prediction.csv", index=False)
     print("\n🎉 Submission CSV saved!")
 
