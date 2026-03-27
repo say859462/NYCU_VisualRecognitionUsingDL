@@ -280,8 +280,18 @@ class ImageClassificationModel(nn.Module):
     def get_saliency(self, x):
         _, feat_l3, _, fused_map = self.forward_features(x)
         fine_map = self.proj_l3_fine(feat_l3)
-        saliency = 0.5 * fused_map.pow(2).mean(dim=1, keepdim=True) + \
+
+        # align spatial size before fusion
+        fused_map_up = F.interpolate(
+            fused_map,
+            size=fine_map.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        saliency = 0.5 * fused_map_up.pow(2).mean(dim=1, keepdim=True) + \
             0.5 * fine_map.pow(2).mean(dim=1, keepdim=True)
+
         saliency = F.interpolate(
             saliency,
             size=x.shape[-2:],

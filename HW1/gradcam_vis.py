@@ -90,7 +90,8 @@ def main():
     parser.add_argument("--val_dir", type=str, default="./Dataset/data/val")
     parser.add_argument("--num_samples_per_class", type=int, default=3)
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--save_dir", type=str, default="./Plot/Attention_Outputs/hr_fine_branch")
+    parser.add_argument("--save_dir", type=str,
+                        default="./Plot/Attention_Outputs/hr_fine_branch_79th")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -148,7 +149,8 @@ def main():
         for img_path in sampled_image_paths:
             raw_img = Image.open(img_path).convert("RGB")
             cropped_img = preprocess_geo(raw_img)
-            input_tensor = preprocess_tensor(cropped_img).unsqueeze(0).to(device)
+            input_tensor = preprocess_tensor(
+                cropped_img).unsqueeze(0).to(device)
             rgb_img = np.asarray(cropped_img).astype(np.float32) / 255.0
 
             # Concat Grad-CAM on fused_map
@@ -168,18 +170,23 @@ def main():
             )
 
             with torch.no_grad():
-                global_probs = torch.softmax(outputs["global_logits"], dim=1)[0].cpu()
-                part2_probs = torch.softmax(outputs["part2_logits"], dim=1)[0].cpu()
+                global_probs = torch.softmax(
+                    outputs["global_logits"], dim=1)[0].cpu()
+                part2_probs = torch.softmax(
+                    outputs["part2_logits"], dim=1)[0].cpu()
 
                 global_pred = int(global_probs.argmax().item())
                 part2_pred = int(part2_probs.argmax().item())
 
-            concat_overlay = _overlay_heatmap_on_image(rgb_img, concat_cam, alpha=0.45)
-            part4_overlay = _overlay_heatmap_on_image(rgb_img, part4_cam, alpha=0.45)
+            concat_overlay = _overlay_heatmap_on_image(
+                rgb_img, concat_cam, alpha=0.45)
+            part4_overlay = _overlay_heatmap_on_image(
+                rgb_img, part4_cam, alpha=0.45)
 
             fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
-            title_color = "green" if str(concat_pred) == str(class_id) else "red"
+            title_color = "green" if str(
+                concat_pred) == str(class_id) else "red"
             fig.suptitle(
                 (
                     f"True: {class_id} | "
@@ -206,7 +213,8 @@ def main():
 
             save_name = f"hr_fine_{os.path.splitext(os.path.basename(img_path))[0]}.png"
             plt.tight_layout()
-            plt.savefig(os.path.join(class_save_dir, save_name), bbox_inches="tight")
+            plt.savefig(os.path.join(class_save_dir, save_name),
+                        bbox_inches="tight")
             plt.close(fig)
 
 

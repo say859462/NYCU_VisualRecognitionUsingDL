@@ -1,6 +1,8 @@
 import torch
 from tqdm import tqdm
 
+from utils import make_background_suppressed_views
+
 
 def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
     if epoch <= stage1_epochs:
@@ -22,7 +24,7 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
         }
 
     return {
-        "stage_name": "Stage 3 | Full PMG + HR fine branch",
+        "stage_name": "Stage 3 | Full PMG + HR fine branch + soft BG suppression",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
         "part4_weight": config.get("pmg_stage3_part4_weight", 0.3),
@@ -40,10 +42,6 @@ def _compute_pmg_loss(outputs, labels, criterion, stage_cfg):
     if stage_cfg["part2_weight"] > 0:
         loss = loss + stage_cfg["part2_weight"] * \
             criterion(outputs["part2_logits"], labels)
-
-    if stage_cfg["part4_weight"] > 0:
-        loss = loss + stage_cfg["part4_weight"] * \
-            criterion(outputs["part4_logits"], labels)
 
     if stage_cfg["concat_weight"] > 0:
         loss = loss + stage_cfg["concat_weight"] * \
@@ -80,6 +78,12 @@ def train_one_epoch(
 
     proto_diversity_weight = config.get("proto_diversity_weight", 0.0)
 
+    enable_soft_bg_suppression = config.get(
+        "enable_soft_bg_suppression", False)
+    bg_threshold_ratio = config.get("bg_threshold_ratio", 0.45)
+    bg_suppress_strength = config.get("bg_suppress_strength", 0.35)
+    bg_blur_kernel = config.get("bg_blur_kernel", 7)
+
     running_loss = 0.0
     correct = 0
     total = 0
@@ -94,8 +98,30 @@ def train_one_epoch(
         use_amp = (device.type == "cuda")
 
         with torch.amp.autocast("cuda", enabled=use_amp):
+            # 主路徑：原圖
             outputs = model.forward_pmg(images)
             loss = _compute_pmg_loss(outputs, labels, criterion, stage_cfg)
+
+            # Stage 3 的 part4：
+            # 使用 soft background suppression 後的 view
+            if stage_cfg["part4_weight"] > 0:
+                if enable_soft_bg_suppression:
+                    with torch.no_grad():
+                        saliency_maps = model.get_saliency(images)
+                        suppressed_images = make_background_suppressed_views(
+                            images=images,
+                            saliency_maps=saliency_maps,
+                            threshold_ratio=bg_threshold_ratio,
+                            suppress_strength=bg_suppress_strength,
+                            blur_kernel=bg_blur_kernel,
+                        )
+                    outputs_part4 = model.forward_pmg(suppressed_images)
+                else:
+                    outputs_part4 = outputs
+
+                loss = loss + stage_cfg["part4_weight"] * criterion(
+                    outputs_part4["part4_logits"], labels
+                )
 
             if proto_diversity_weight > 0:
                 loss = loss + proto_diversity_weight * model.prototype_diversity_loss()

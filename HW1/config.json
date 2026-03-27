@@ -1,6 +1,6 @@
 {
   "batch_size": 16,
-  "num_epochs": 25,
+  "num_epochs": 30,
   "learning_rate": 6e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
@@ -29,5 +29,10 @@
   "pmg_stage3_global_weight": 1.0,
   "pmg_stage3_part2_weight": 0.5,
   "pmg_stage3_part4_weight": 0.3,
-  "pmg_stage3_concat_weight": 1.0
+  "pmg_stage3_concat_weight": 1.0,
+
+  "enable_soft_bg_suppression": true,
+  "bg_threshold_ratio": 0.45,
+  "bg_suppress_strength": 0.35,
+  "bg_blur_kernel": 7
 }
