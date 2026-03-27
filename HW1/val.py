@@ -1,48 +1,60 @@
 import torch
 from tqdm import tqdm
-from train import _compute_pmg_loss, _get_stage_weights
+from train import _get_stage_weights, _compute_pmg_loss
 
 
-def validate_one_epoch(model, val_loader, criterion, device, config, epoch=None):
+def _get_eval_logits(outputs, stage_cfg):
+    if stage_cfg["fusion_weight"] > 0:
+        return outputs["fusion_logits"]
+    if stage_cfg["concat_weight"] > 0:
+        return outputs["concat_logits"]
+    return outputs["global_logits"]
+
+
+def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
     model.eval()
 
+    stage_cfg = _get_stage_weights(
+        epoch=epoch,
+        stage1_epochs=config.get("pmg_stage1_epochs", 4),
+        stage2_epochs=config.get("pmg_stage2_epochs", 4),
+        config=config,
+    )
+
     running_loss = 0.0
-    total_preds = 0
-    correct_preds = 0
-    all_predictions = []
-    all_targets = []
+    correct = 0
+    total = 0
 
-    stage1_epochs = config.get("pmg_stage1_epochs", 4)
-    stage2_epochs = config.get("pmg_stage2_epochs", 4)
-    eval_epoch = epoch if epoch is not None else (stage1_epochs + stage2_epochs + 1)
-    stage_cfg = _get_stage_weights(eval_epoch, stage1_epochs, stage2_epochs, config)
-
-    pbar = tqdm(val_loader, desc="Validating", leave=False, colour="green")
+    all_preds = []
+    all_labels = []
+    fusion_weights_snapshot = None
 
     with torch.no_grad():
+        pbar = tqdm(val_loader, desc="Validation", leave=False)
         for images, labels in pbar:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            outputs = model.forward_pmg(images)
+            outputs = model.forward_pmg(images, stage_cfg=stage_cfg)
             loss = _compute_pmg_loss(outputs, labels, criterion, stage_cfg)
-            logits = outputs["concat_logits"] if stage_cfg["concat_weight"] > 0 else outputs["global_logits"]
 
-            batch_size = images.size(0)
-            running_loss += loss.item() * batch_size
-            total_preds += batch_size
+            logits_for_eval = _get_eval_logits(outputs, stage_cfg)
+            preds = torch.argmax(logits_for_eval, dim=1)
 
-            preds = torch.argmax(logits, dim=1)
-            correct_preds += torch.sum(preds == labels).item()
-            all_predictions.extend(preds.cpu().numpy())
-            all_targets.extend(labels.cpu().numpy())
+            running_loss += loss.item() * images.size(0)
+            correct += torch.sum(preds == labels).item()
+            total += labels.size(0)
 
-            pbar.set_postfix({
-                'Loss': f"{running_loss / total_preds:.4f}",
-                'Acc': f"{(correct_preds / total_preds) * 100:.2f}%",
-                'Stage': stage_cfg['stage_name'].split('|')[0].strip(),
-            })
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
 
-    epoch_loss = running_loss / total_preds
-    epoch_acc = (correct_preds / total_preds) * 100
-    return epoch_loss, epoch_acc, all_predictions, all_targets, stage_cfg
+            if fusion_weights_snapshot is None:
+                fusion_weights_snapshot = outputs["fusion_weights"]
+
+    return (
+        running_loss / total,
+        (correct / total) * 100,
+        all_preds,
+        all_labels,
+        fusion_weights_snapshot,
+    )

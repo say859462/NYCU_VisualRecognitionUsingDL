@@ -1,6 +1,6 @@
 {
   "batch_size": 32,
-  "num_epochs": 30,
+  "num_epochs": 25,
   "learning_rate": 8e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
@@ -9,23 +9,32 @@
   "best_loss_model_path": "./Model_Weight/best_loss_model.pth",
   "resume_training": false,
   "early_stopping_patience": 30,
+
   "num_subcenters": 3,
   "embed_dim": 256,
-  "local1_view_weight": 0.0,
-  "proto_diversity_weight": 0.005,
-  "local_crop_threshold": 0.45,
-  "local_crop_padding_ratio": 0.18,
-  "local_min_crop_ratio": 0.3,
-  "local_max_crop_ratio": 0.85,
-  "local_fallback_crop_ratio": 0.5,
+  "proto_diversity_weight": 0.0,
+
   "pmg_stage1_epochs": 4,
   "pmg_stage2_epochs": 4,
+
   "pmg_stage1_global_weight": 1.0,
+
   "pmg_stage2_global_weight": 1.0,
   "pmg_stage2_part2_weight": 0.5,
+  "pmg_stage2_part4_weight": 0.0,
   "pmg_stage2_concat_weight": 0.5,
+  "pmg_stage2_fusion_weight": 1.0,
+
   "pmg_stage3_global_weight": 1.0,
   "pmg_stage3_part2_weight": 0.5,
   "pmg_stage3_part4_weight": 0.5,
-  "pmg_stage3_concat_weight": 1.0
+  "pmg_stage3_concat_weight": 1.0,
+  "pmg_stage3_fusion_weight": 1.0,
+
+  "fusion_init_weights": {
+    "global": 0.15,
+    "part2": 0.25,
+    "part4": 0.1,
+    "concat": 0.5
+  }
 }
