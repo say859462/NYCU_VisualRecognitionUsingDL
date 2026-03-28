@@ -9,7 +9,6 @@ from torchvision import transforms
 
 from dataset import ImageDataset
 from model import ImageClassificationModel
-from utils import PadToSquare
 
 
 def main():
@@ -25,8 +24,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     test_transform = transforms.Compose([
-        PadToSquare(fill=(0, 0, 0)),
-        transforms.Resize((448, 448)),
+        transforms.Resize((512, 512)),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])

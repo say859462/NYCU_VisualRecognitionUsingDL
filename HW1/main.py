@@ -2,7 +2,6 @@ from utils import (
     plot_training_curves,
     plot_per_class_error,
     plot_long_tail_accuracy,
-    PadToSquare,
 )
 from val import validate_one_epoch
 from train import train_one_epoch
@@ -82,15 +81,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_transform = transforms.Compose([
-        PadToSquare(fill=(0, 0, 0)),
-        transforms.Resize((480, 480)),
-        transforms.RandomCrop(448),
+        transforms.Resize((576, 576)),
+        transforms.RandomCrop(512),
         transforms.RandomHorizontalFlip(),
         transforms.RandomAffine(
-            degrees=10,
-            translate=(0.03, 0.03),
-            scale=(0.97, 1.03),
-            shear=3,
+            degrees=7,
+            translate=(0.02, 0.02),
+            scale=(0.98, 1.02),
+            shear=2,
         ),
         transforms.ColorJitter(
             brightness=0.12,
@@ -107,8 +105,7 @@ def main():
     ])
 
     val_transform = transforms.Compose([
-        PadToSquare(fill=(0, 0, 0)),
-        transforms.Resize((448, 448)),
+        transforms.Resize((512, 512)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],

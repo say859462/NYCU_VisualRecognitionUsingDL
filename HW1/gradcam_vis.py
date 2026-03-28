@@ -12,7 +12,6 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from model import ImageClassificationModel
-from utils import PadToSquare
 
 
 def _normalize_map(x: np.ndarray) -> np.ndarray:
@@ -94,7 +93,8 @@ def main():
     parser.add_argument("--val_dir", type=str, default="./Dataset/data/val")
     parser.add_argument("--num_samples_per_class", type=int, default=3)
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--save_dir", type=str, default="./Plot/Attention_Outputs/logit_fusion")
+    parser.add_argument("--save_dir", type=str,
+                        default="./Plot/Attention_Outputs/PurePMG_Resize576")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -121,15 +121,12 @@ def main():
     model.eval()
 
     preprocess_geo = transforms.Compose([
-        PadToSquare(fill=(0, 0, 0)),
-        transforms.Resize((448, 448)),
+        transforms.Resize((512, 512)),
     ])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
-
-    fusion_w = torch.softmax(model.logit_fusion.fusion_logits_param, dim=0).detach().cpu().numpy()
 
     for class_id in tqdm(range(config["num_classes"]), desc="Classes Processed"):
         class_dir = os.path.join(args.val_dir, str(class_id))
@@ -153,15 +150,15 @@ def main():
 
         for img_path in sampled_image_paths:
             raw_img = Image.open(img_path).convert("RGB")
-            padded_img = preprocess_geo(raw_img)
-            input_tensor = preprocess_tensor(padded_img).unsqueeze(0).to(device)
-            rgb_img = np.asarray(padded_img).astype(np.float32) / 255.0
+            vis_img = preprocess_geo(raw_img)
+            input_tensor = preprocess_tensor(vis_img).unsqueeze(0).to(device)
+            rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
 
-            fusion_cam, fusion_pred, fusion_probs, outputs = compute_gradcam(
+            concat_cam, concat_pred, concat_probs, outputs = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
                 target_module=model.fuse,
-                target_logits_key="fusion_logits",
+                target_logits_key="concat_logits",
             )
 
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
@@ -172,46 +169,51 @@ def main():
             )
 
             with torch.no_grad():
-                global_probs = torch.softmax(outputs["global_logits"], dim=1)[0].cpu()
-                part2_probs = torch.softmax(outputs["part2_logits"], dim=1)[0].cpu()
+                global_probs = torch.softmax(
+                    outputs["global_logits"], dim=1)[0].cpu()
+                part2_probs = torch.softmax(
+                    outputs["part2_logits"], dim=1)[0].cpu()
 
                 global_pred = int(global_probs.argmax().item())
                 part2_pred = int(part2_probs.argmax().item())
 
-            fusion_overlay = _overlay_heatmap_on_image(rgb_img, fusion_cam, alpha=0.45)
-            part4_overlay = _overlay_heatmap_on_image(rgb_img, part4_cam, alpha=0.45)
+            concat_overlay = _overlay_heatmap_on_image(
+                rgb_img, concat_cam, alpha=0.45)
+            part4_overlay = _overlay_heatmap_on_image(
+                rgb_img, part4_cam, alpha=0.45)
 
-            fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
-            title_color = "green" if str(fusion_pred) == str(class_id) else "red"
+            title_color = "green" if str(
+                concat_pred) == str(class_id) else "red"
             fig.suptitle(
                 (
                     f"True: {class_id} | "
                     f"{_fmt_pred('G', global_probs, global_pred)} | "
                     f"{_fmt_pred('P2', part2_probs, part2_pred)} | "
                     f"{_fmt_pred('P4', part4_probs, part4_pred)} | "
-                    f"{_fmt_pred('Fusion', fusion_probs, fusion_pred)}\n"
-                    f"Fusion weights -> G:{fusion_w[0]:.3f}, P2:{fusion_w[1]:.3f}, P4:{fusion_w[2]:.3f}"
+                    f"{_fmt_pred('Concat', concat_probs, concat_pred)}"
                 ),
                 color=title_color,
                 fontweight="bold"
             )
 
-            axes[0].imshow(padded_img)
+            axes[0].imshow(vis_img)
             axes[0].axis("off")
-            axes[0].set_title("Original")
+            axes[0].set_title("Original Resize576")
 
-            axes[1].imshow(fusion_overlay)
+            axes[1].imshow(concat_overlay)
             axes[1].axis("off")
-            axes[1].set_title("Fusion Grad-CAM")
+            axes[1].set_title("Concat Grad-CAM")
 
             axes[2].imshow(part4_overlay)
             axes[2].axis("off")
             axes[2].set_title("Part4 Grad-CAM")
 
-            save_name = f"logit_fusion_{os.path.splitext(os.path.basename(img_path))[0]}.png"
+            save_name = f"pure_pmg_resize576_{os.path.splitext(os.path.basename(img_path))[0]}.png"
             plt.tight_layout()
-            plt.savefig(os.path.join(class_save_dir, save_name), bbox_inches="tight")
+            plt.savefig(os.path.join(class_save_dir, save_name),
+                        bbox_inches="tight")
             plt.close(fig)
 
 

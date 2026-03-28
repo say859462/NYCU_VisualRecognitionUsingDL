@@ -105,7 +105,6 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = resnet.layer3
         self.layer4 = resnet.layer4
 
-        # Pure PMG fused path
         self.proj_l3 = nn.Sequential(
             nn.Conv2d(1024, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
@@ -124,8 +123,6 @@ class ImageClassificationModel(nn.Module):
 
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
-
-        # part4: 4x4 Avg + Max pooling
         self.pool_4_avg = nn.AdaptiveAvgPool2d((4, 4))
         self.pool_4_max = nn.AdaptiveMaxPool2d((4, 4))
 
@@ -236,23 +233,18 @@ class ImageClassificationModel(nn.Module):
         _, _, _, fused_map = self.forward_features(x)
 
         global_feat = self.gem(fused_map)
-        global_logits, global_embed, global_logits_all = self.global_head(
-            global_feat)
+        global_logits, global_embed, global_logits_all = self.global_head(global_feat)
 
         part2_feat = self.pool_2(fused_map).flatten(1)
-        part2_logits, part2_embed, part2_logits_all = self.part2_head(
-            part2_feat)
+        part2_logits, part2_embed, part2_logits_all = self.part2_head(part2_feat)
 
         part4_avg = self.pool_4_avg(fused_map)
         part4_max = self.pool_4_max(fused_map)
         part4_feat = (part4_avg + part4_max).flatten(1)
-        part4_logits, part4_embed, part4_logits_all = self.part4_head(
-            part4_feat)
+        part4_logits, part4_embed, part4_logits_all = self.part4_head(part4_feat)
 
-        concat_feat = torch.cat(
-            [global_embed, part2_embed, part4_embed], dim=1)
-        concat_logits, concat_embed, concat_logits_all = self.concat_head(
-            concat_feat)
+        concat_feat = torch.cat([global_embed, part2_embed, part4_embed], dim=1)
+        concat_logits, concat_embed, concat_logits_all = self.concat_head(concat_feat)
 
         outputs = {
             "global_logits": global_logits,
