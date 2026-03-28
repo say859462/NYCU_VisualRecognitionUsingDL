@@ -22,7 +22,7 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
         }
 
     return {
-        "stage_name": "Stage 3 | Full Pure PMG + part4 AvgMax + branch interaction",
+        "stage_name": "Stage 3 | Cross-fused backbone + L3-part4 residual correction",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
         "part4_weight": config.get("pmg_stage3_part4_weight", 0.5),

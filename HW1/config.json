@@ -19,7 +19,7 @@
   "pmg_stage2_part2_weight": 0.5,
   "pmg_stage2_concat_weight": 0.5,
   "pmg_stage3_global_weight": 1.0,
-  "pmg_stage3_part2_weight": 0.5,
-  "pmg_stage3_part4_weight": 0.5,
-  "pmg_stage3_concat_weight": 1.0
+  "pmg_stage3_part2_weight": 0.2,
+  "pmg_stage3_part4_weight": 0.25,
+  "pmg_stage3_concat_weight": 1.1
 }

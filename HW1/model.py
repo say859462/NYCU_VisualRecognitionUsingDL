@@ -285,7 +285,7 @@ class ImageClassificationModel(nn.Module):
             512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2
         )
         self.part4_head = PMGHead(
-            512 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2
+            256 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2
         )
 
         self.cross_fusion = GlobalGuidedCrossAttention(
@@ -412,8 +412,9 @@ class ImageClassificationModel(nn.Module):
         part2_logits, part2_embed, part2_logits_all = self.part2_head(
             part2_feat)
 
-        part4_avg = self.pool_4_avg(fused_map)
-        part4_max = self.pool_4_max(fused_map)
+        # Fine-detail branch now reads directly from high-resolution L3 features.
+        part4_avg = self.pool_4_avg(feat_l3_proj)
+        part4_max = self.pool_4_max(feat_l3_proj)
         part4_feat = (part4_avg + part4_max).flatten(1)
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
             part4_feat)
@@ -452,6 +453,7 @@ class ImageClassificationModel(nn.Module):
             "feat_l4_proj": feat_l4_proj,
             "fine_tokens": fine_tokens,
             "cross_attn_weights": cross_attn_weights,
+            "part4_source": feat_l3_proj,
             "part4_avg_map": part4_avg,
             "part4_max_map": part4_max,
         }
