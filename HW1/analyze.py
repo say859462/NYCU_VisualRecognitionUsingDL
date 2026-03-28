@@ -75,12 +75,12 @@ def build_attribution_tag(g_ok, p2_ok, p4_ok, c_ok):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed PMG analysis with concat output"
+        description="Detailed PMG analysis with branch interaction concat output"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_PurePMG_AvgMax_Resize576")
+                        default="./Plot/Analysis_PurePMG_BranchInteraction_Resize448_88th")
     parser.add_argument("--num_workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -93,7 +93,7 @@ def main():
     model_path = args.model_path if args.model_path is not None else config["best_model_path"]
 
     val_transform = transforms.Compose([
-        transforms.Resize((512, 512)),
+        transforms.Resize((448, 448)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -132,9 +132,6 @@ def main():
     part2_preds = []
     part4_preds = []
     concat_preds = []
-
-    attribution_counter = Counter()
-    confusion_counter = Counter()
 
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc="Analyzing"):
@@ -186,12 +183,6 @@ def main():
                 p4_gap = safe_top2_gap(part4_prob[i])
                 c_gap = safe_top2_gap(concat_prob[i])
 
-                tag = build_attribution_tag(g_ok, p2_ok, p4_ok, c_ok)
-                attribution_counter[tag] += 1
-
-                if cp != y:
-                    confusion_counter[(y, cp)] += 1
-
                 rows.append({
                     "true_label": y,
                     "global_pred": gp,
@@ -217,11 +208,10 @@ def main():
                     "all_wrong": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok)),
                     "all_wrong_high_conf_08": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok) and (c_conf >= 0.8)),
                     "all_wrong_high_conf_09": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok) and (c_conf >= 0.9)),
-                    "attribution_tag": tag,
+                    "attribution_tag": build_attribution_tag(g_ok, p2_ok, p4_ok, c_ok),
                 })
 
     df = pd.DataFrame(rows)
-
     detailed_csv_path = os.path.join(
         args.save_dir, "pmg_predictions_detailed.csv")
     df.to_csv(detailed_csv_path, index=False)

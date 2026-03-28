@@ -135,8 +135,10 @@ class ImageClassificationModel(nn.Module):
         self.part4_head = PMGHead(
             512 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2
         )
+
+        # 3 個原始 branch embedding + 3 個 pairwise interaction
         self.concat_head = PMGHead(
-            embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3
+            embed_dim * 6, embed_dim, num_classes, num_subcenters, dropout=0.3
         )
 
         self._freeze_shallow_layers()
@@ -192,7 +194,8 @@ class ImageClassificationModel(nn.Module):
             self.concat_head,
         ]:
             head_params.extend(
-                [p for p in module.parameters() if p.requires_grad])
+                [p for p in module.parameters() if p.requires_grad]
+            )
 
         return [
             {
@@ -233,18 +236,36 @@ class ImageClassificationModel(nn.Module):
         _, _, _, fused_map = self.forward_features(x)
 
         global_feat = self.gem(fused_map)
-        global_logits, global_embed, global_logits_all = self.global_head(global_feat)
+        global_logits, global_embed, global_logits_all = self.global_head(
+            global_feat)
 
         part2_feat = self.pool_2(fused_map).flatten(1)
-        part2_logits, part2_embed, part2_logits_all = self.part2_head(part2_feat)
+        part2_logits, part2_embed, part2_logits_all = self.part2_head(
+            part2_feat)
 
         part4_avg = self.pool_4_avg(fused_map)
         part4_max = self.pool_4_max(fused_map)
         part4_feat = (part4_avg + part4_max).flatten(1)
-        part4_logits, part4_embed, part4_logits_all = self.part4_head(part4_feat)
+        part4_logits, part4_embed, part4_logits_all = self.part4_head(
+            part4_feat)
 
-        concat_feat = torch.cat([global_embed, part2_embed, part4_embed], dim=1)
-        concat_logits, concat_embed, concat_logits_all = self.concat_head(concat_feat)
+        pair_g_p2 = global_embed * part2_embed
+        pair_g_p4 = global_embed * part4_embed
+        pair_p2_p4 = part2_embed * part4_embed
+
+        concat_feat = torch.cat(
+            [
+                global_embed,
+                part2_embed,
+                part4_embed,
+                pair_g_p2,
+                pair_g_p4,
+                pair_p2_p4,
+            ],
+            dim=1,
+        )
+        concat_logits, concat_embed, concat_logits_all = self.concat_head(
+            concat_feat)
 
         outputs = {
             "global_logits": global_logits,
@@ -255,6 +276,11 @@ class ImageClassificationModel(nn.Module):
             "global_embed": global_embed,
             "part2_embed": part2_embed,
             "part4_embed": part4_embed,
+
+            "pair_g_p2": pair_g_p2,
+            "pair_g_p4": pair_g_p4,
+            "pair_p2_p4": pair_p2_p4,
+
             "concat_embed": concat_embed,
 
             "global_logits_all": global_logits_all,

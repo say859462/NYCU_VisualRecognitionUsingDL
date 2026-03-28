@@ -94,7 +94,7 @@ def main():
     parser.add_argument("--num_samples_per_class", type=int, default=3)
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Attention_Outputs/PurePMG_Resize576")
+                        default="./Plot/Attention_Outputs/PurePMG_BranchInteraction_Resize576_88th")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -121,7 +121,7 @@ def main():
     model.eval()
 
     preprocess_geo = transforms.Compose([
-        transforms.Resize((512, 512)),
+        transforms.Resize((576, 576)),
     ])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),
@@ -210,7 +210,7 @@ def main():
             axes[2].axis("off")
             axes[2].set_title("Part4 Grad-CAM")
 
-            save_name = f"pure_pmg_resize576_{os.path.splitext(os.path.basename(img_path))[0]}.png"
+            save_name = f"pure_pmg_branch_interaction_resize576_{os.path.splitext(os.path.basename(img_path))[0]}.png"
             plt.tight_layout()
             plt.savefig(os.path.join(class_save_dir, save_name),
                         bbox_inches="tight")

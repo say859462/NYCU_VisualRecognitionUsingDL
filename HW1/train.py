@@ -22,7 +22,7 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
         }
 
     return {
-        "stage_name": "Stage 3 | Full Pure PMG + part4 AvgMax",
+        "stage_name": "Stage 3 | Full Pure PMG + part4 AvgMax + branch interaction",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
         "part4_weight": config.get("pmg_stage3_part4_weight", 0.5),
@@ -33,13 +33,17 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
 def _compute_pmg_loss(outputs, labels, criterion, stage_cfg):
     loss = 0.0
     if stage_cfg["global_weight"] > 0:
-        loss = loss + stage_cfg["global_weight"] * criterion(outputs["global_logits"], labels)
+        loss = loss + stage_cfg["global_weight"] * \
+            criterion(outputs["global_logits"], labels)
     if stage_cfg["part2_weight"] > 0:
-        loss = loss + stage_cfg["part2_weight"] * criterion(outputs["part2_logits"], labels)
+        loss = loss + stage_cfg["part2_weight"] * \
+            criterion(outputs["part2_logits"], labels)
     if stage_cfg["part4_weight"] > 0:
-        loss = loss + stage_cfg["part4_weight"] * criterion(outputs["part4_logits"], labels)
+        loss = loss + stage_cfg["part4_weight"] * \
+            criterion(outputs["part4_logits"], labels)
     if stage_cfg["concat_weight"] > 0:
-        loss = loss + stage_cfg["concat_weight"] * criterion(outputs["concat_logits"], labels)
+        loss = loss + stage_cfg["concat_weight"] * \
+            criterion(outputs["concat_logits"], labels)
     return loss
 
 
