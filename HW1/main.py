@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--config", type=str, default="./config.json")
     args = parser.parse_args()
 
-    with open(args.config, "r") as f:
+    with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
     batch_size = config["batch_size"]
@@ -141,6 +141,9 @@ def main():
         pretrained=True,
         num_subcenters=num_subcenters,
         embed_dim=embed_dim,
+        use_logit_router=config.get("use_logit_router", True),
+        router_hidden_dim=config.get("router_hidden_dim", 256),
+        router_dropout=config.get("router_dropout", 0.1),
     ).to(device)
 
     if not model.check_parameters():
@@ -161,8 +164,16 @@ def main():
     best_val_acc = 0.0
     best_val_loss_for_acc = float("inf")
     best_val_loss_only = float("inf")
-    history = {"train_loss": [], "train_acc": [],
-               "val_loss": [], "val_acc": []}
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+        "train_concat_acc": [],
+        "train_router_acc": [],
+        "val_concat_acc": [],
+        "val_router_acc": [],
+    }
     best_val_preds = []
     best_val_labels = []
 
@@ -190,7 +201,7 @@ def main():
             current_epoch = epoch + 1
             print(f"\n--- Epoch {current_epoch}/{num_epochs} ---")
 
-            train_loss, train_acc, stage_cfg = train_one_epoch(
+            train_stats = train_one_epoch(
                 model=model,
                 train_loader=train_loader,
                 criterion=criterion_train,
@@ -201,7 +212,7 @@ def main():
                 config=config,
             )
 
-            val_loss, val_acc, val_preds, val_labels, _ = validate_one_epoch(
+            val_stats = validate_one_epoch(
                 model=model,
                 val_loader=val_loader,
                 criterion=criterion_val,
@@ -212,10 +223,28 @@ def main():
 
             scheduler.step()
 
+            train_loss = train_stats["loss"]
+            train_acc = train_stats["main_acc"]
+            stage_cfg = train_stats["stage_cfg"]
+            train_concat_acc = train_stats.get("concat_acc", train_acc)
+            train_router_acc = train_stats.get("router_acc", 0.0)
+
+            val_loss = val_stats["loss"]
+            val_acc = val_stats["main_acc"]
+            val_preds = val_stats["preds"]
+            val_labels = val_stats["labels"]
+            val_concat_acc = val_stats.get("concat_acc", val_acc)
+            val_router_acc = val_stats.get("router_acc", 0.0)
+            router_weight_means = val_stats.get("router_weight_means", None)
+
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)
             history["val_loss"].append(val_loss)
             history["val_acc"].append(val_acc)
+            history["train_concat_acc"].append(train_concat_acc)
+            history["train_router_acc"].append(train_router_acc)
+            history["val_concat_acc"].append(val_concat_acc)
+            history["val_router_acc"].append(val_router_acc)
 
             print(stage_cfg["stage_name"])
             print(
@@ -223,14 +252,26 @@ def main():
                 f"global: {stage_cfg['global_weight']:.2f}, "
                 f"part2: {stage_cfg['part2_weight']:.2f}, "
                 f"part4: {stage_cfg['part4_weight']:.2f}, "
-                f"concat: {stage_cfg['concat_weight']:.2f}"
+                f"concat: {stage_cfg['concat_weight']:.2f}, "
+                f"router: {stage_cfg.get('router_weight', 0.0):.2f}"
             )
 
             print(
                 f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
-                f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
-                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%"
+                f"Train Loss: {train_loss:.4f} | Train Main Acc: {train_acc:.2f}% | "
+                f"Train Concat Acc: {train_concat_acc:.2f}% | Train Router Acc: {train_router_acc:.2f}% | "
+                f"Val Loss: {val_loss:.4f} | Val Main Acc: {val_acc:.2f}% | "
+                f"Val Concat Acc: {val_concat_acc:.2f}% | Val Router Acc: {val_router_acc:.2f}%"
             )
+
+            if router_weight_means is not None:
+                print(
+                    "Router mean weights -> "
+                    f"global: {router_weight_means['global']:.3f}, "
+                    f"part2: {router_weight_means['part2']:.3f}, "
+                    f"part4: {router_weight_means['part4']:.3f}, "
+                    f"concat: {router_weight_means['concat']:.3f}"
+                )
 
             improved = False
 
@@ -287,7 +328,7 @@ def main():
         plot_training_curves(
             history["train_loss"], history["val_loss"],
             history["train_acc"], history["val_acc"],
-            save_path=os.path.join(plot_dir, "training_curves.png")
+            save_path=os.path.join(plot_dir, "training_curves_router.png")
         )
 
         if best_val_preds and best_val_labels:
@@ -295,14 +336,14 @@ def main():
                 best_val_preds,
                 best_val_labels,
                 num_classes=num_classes,
-                save_path=os.path.join(plot_dir, "error_dist.png")
+                save_path=os.path.join(plot_dir, "error_dist_router.png")
             )
             plot_long_tail_accuracy(
                 train_labels=train_dataset.targets,
                 val_preds=best_val_preds,
                 val_labels=best_val_labels,
                 num_classes=num_classes,
-                save_path=os.path.join(plot_dir, "long_tail_acc.png")
+                save_path=os.path.join(plot_dir, "long_tail_acc_router.png")
             )
 
     print(

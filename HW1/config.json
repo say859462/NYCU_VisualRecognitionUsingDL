@@ -8,22 +8,23 @@
   "best_model_path": "./Model_Weight/best_model.pth",
   "best_loss_model_path": "./Model_Weight/best_loss_model.pth",
   "resume_training": false,
-  "early_stopping_patience": 25,
+  "early_stopping_patience": 30,
   "num_subcenters": 3,
   "embed_dim": 256,
   "proto_diversity_weight": 0.0,
-
   "pmg_stage1_epochs": 4,
   "pmg_stage2_epochs": 4,
-
   "pmg_stage1_global_weight": 1.0,
-
   "pmg_stage2_global_weight": 1.0,
   "pmg_stage2_part2_weight": 0.5,
   "pmg_stage2_concat_weight": 0.5,
-
   "pmg_stage3_global_weight": 1.0,
   "pmg_stage3_part2_weight": 0.5,
   "pmg_stage3_part4_weight": 0.5,
-  "pmg_stage3_concat_weight": 1.0
+  "pmg_stage3_concat_weight": 1.0,
+  "use_logit_router": true,
+  "router_hidden_dim": 256,
+  "router_dropout": 0.1,
+  "router_loss_weight": 1.0,
+  "router_balance_weight": 0.02
 }
