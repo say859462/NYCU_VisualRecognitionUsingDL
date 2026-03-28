@@ -1,8 +1,9 @@
 import argparse
 import json
 import os
-from collections import Counter, defaultdict
+from collections import Counter
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
@@ -73,14 +74,17 @@ def build_attribution_tag(g_ok, p2_ok, p4_ok, c_ok):
     return "mixed"
 
 
+def has_gate_outputs(outputs):
+    return ("gate_weights" in outputs) and (outputs["gate_weights"] is not None)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed PMG / HR fine branch analysis with branch attribution"
+        description="Detailed PMG analysis with branch attribution and optional gate analysis"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Analysis_PurePMG_83th")
+    parser.add_argument("--save_dir", type=str, default="./Plot/Analysis_GatedPurePMG")
     parser.add_argument("--num_workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -135,6 +139,8 @@ def main():
     attribution_counter = Counter()
     confusion_counter = Counter()
 
+    has_gate = False
+
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc="Analyzing"):
             images = images.to(device, non_blocking=True)
@@ -162,6 +168,11 @@ def main():
             part4_preds.extend(part4_pred.cpu().tolist())
             concat_preds.extend(concat_pred.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
+
+            gate_weights = None
+            if has_gate_outputs(outputs):
+                has_gate = True
+                gate_weights = outputs["gate_weights"].detach().cpu()
 
             for i in range(labels.size(0)):
                 y = labels[i].item()
@@ -191,7 +202,7 @@ def main():
                 if cp != y:
                     confusion_counter[(y, cp)] += 1
 
-                rows.append({
+                row = {
                     "true_label": y,
                     "global_pred": gp,
                     "part2_pred": p2,
@@ -217,16 +228,29 @@ def main():
                     "all_wrong_high_conf_08": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok) and (c_conf >= 0.8)),
                     "all_wrong_high_conf_09": int((not g_ok) and (not p2_ok) and (not p4_ok) and (not c_ok) and (c_conf >= 0.9)),
                     "attribution_tag": tag,
-                })
+                }
+
+                if gate_weights is not None:
+                    row["gate_global"] = float(gate_weights[i, 0].item())
+                    row["gate_part2"] = float(gate_weights[i, 1].item())
+                    row["gate_part4"] = float(gate_weights[i, 2].item())
+                    row["gate_argmax"] = int(torch.argmax(gate_weights[i]).item())
+                else:
+                    row["gate_global"] = np.nan
+                    row["gate_part2"] = np.nan
+                    row["gate_part4"] = np.nan
+                    row["gate_argmax"] = np.nan
+
+                rows.append(row)
 
     df = pd.DataFrame(rows)
 
-    detailed_csv_path = os.path.join(
-        args.save_dir, "pmg_predictions_detailed.csv")
+    detailed_csv_path = os.path.join(args.save_dir, "pmg_predictions_detailed.csv")
     df.to_csv(detailed_csv_path, index=False)
 
     # Overall summary
     concat_error_df = df[df["concat_correct"] == 0]
+
     summary = {
         "num_samples": len(all_labels),
         "global_acc": compute_accuracy(global_preds, all_labels),
@@ -242,8 +266,7 @@ def main():
         "case_part4_right_concat_wrong": int(((df["part4_correct"] == 1) & (df["concat_correct"] == 0)).sum()),
         "case_global_right_concat_wrong": int(((df["global_correct"] == 1) & (df["concat_correct"] == 0)).sum()),
         "case_any_branch_right_concat_wrong": int((
-            ((df["global_correct"] == 1) |
-             (df["part2_correct"] == 1) | (df["part4_correct"] == 1))
+            ((df["global_correct"] == 1) | (df["part2_correct"] == 1) | (df["part4_correct"] == 1))
             & (df["concat_correct"] == 0)
         ).sum()),
 
@@ -256,7 +279,24 @@ def main():
         "mean_concat_error_top2_gap": float(concat_error_df["concat_top2_gap"].mean()) if len(concat_error_df) > 0 else 0.0,
         "high_conf_wrong_count_ge_0.9": int((concat_error_df["concat_conf"] >= 0.9).sum()),
         "high_conf_wrong_count_ge_0.8": int((concat_error_df["concat_conf"] >= 0.8).sum()),
+        "has_gate_outputs": bool(has_gate),
     }
+
+    if has_gate:
+        summary["mean_gate_global"] = float(df["gate_global"].mean())
+        summary["mean_gate_part2"] = float(df["gate_part2"].mean())
+        summary["mean_gate_part4"] = float(df["gate_part4"].mean())
+
+        error_gate_df = df[df["concat_correct"] == 0]
+        correct_gate_df = df[df["concat_correct"] == 1]
+
+        summary["mean_gate_global_on_correct"] = float(correct_gate_df["gate_global"].mean()) if len(correct_gate_df) > 0 else 0.0
+        summary["mean_gate_part2_on_correct"] = float(correct_gate_df["gate_part2"].mean()) if len(correct_gate_df) > 0 else 0.0
+        summary["mean_gate_part4_on_correct"] = float(correct_gate_df["gate_part4"].mean()) if len(correct_gate_df) > 0 else 0.0
+
+        summary["mean_gate_global_on_error"] = float(error_gate_df["gate_global"].mean()) if len(error_gate_df) > 0 else 0.0
+        summary["mean_gate_part2_on_error"] = float(error_gate_df["gate_part2"].mean()) if len(error_gate_df) > 0 else 0.0
+        summary["mean_gate_part4_on_error"] = float(error_gate_df["gate_part4"].mean()) if len(error_gate_df) > 0 else 0.0
 
     summary_path = os.path.join(args.save_dir, "analysis_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -277,8 +317,17 @@ def main():
         "all_wrong_high_conf_09": summary["all_wrong_high_conf_09"],
     }
 
-    branch_summary_path = os.path.join(
-        args.save_dir, "branch_attribution_summary.json")
+    if has_gate:
+        branch_attribution_summary["mean_gate_by_tag"] = {}
+        for tag in sorted(df["attribution_tag"].unique().tolist()):
+            tag_df = df[df["attribution_tag"] == tag]
+            branch_attribution_summary["mean_gate_by_tag"][tag] = {
+                "gate_global": float(tag_df["gate_global"].mean()),
+                "gate_part2": float(tag_df["gate_part2"].mean()),
+                "gate_part4": float(tag_df["gate_part4"].mean()),
+            }
+
+    branch_summary_path = os.path.join(args.save_dir, "branch_attribution_summary.json")
     with open(branch_summary_path, "w", encoding="utf-8") as f:
         json.dump(branch_attribution_summary, f, indent=2, ensure_ascii=False)
 
@@ -286,7 +335,8 @@ def main():
     per_class_rows = []
     for cls in sorted(df["true_label"].unique().tolist()):
         cls_df = df[df["true_label"] == cls]
-        per_class_rows.append({
+
+        row = {
             "class_id": int(cls),
             "num_samples": int(len(cls_df)),
             "global_acc": float(100.0 * cls_df["global_correct"].mean()),
@@ -296,20 +346,26 @@ def main():
             "global_wrong_part4_right": int(((cls_df["global_correct"] == 0) & (cls_df["part4_correct"] == 1)).sum()),
             "part4_right_concat_wrong": int(((cls_df["part4_correct"] == 1) & (cls_df["concat_correct"] == 0)).sum()),
             "all_wrong_count": int(cls_df["all_wrong"].sum()),
-        })
+        }
+
+        if has_gate:
+            row["mean_gate_global"] = float(cls_df["gate_global"].mean())
+            row["mean_gate_part2"] = float(cls_df["gate_part2"].mean())
+            row["mean_gate_part4"] = float(cls_df["gate_part4"].mean())
+
+        per_class_rows.append(row)
 
     per_class_df = pd.DataFrame(per_class_rows).sort_values(
         by=["concat_acc", "part4_acc", "class_id"], ascending=[True, True, True]
     )
-    per_class_csv_path = os.path.join(
-        args.save_dir, "per_class_branch_acc.csv")
+    per_class_csv_path = os.path.join(args.save_dir, "per_class_branch_acc.csv")
     per_class_df.to_csv(per_class_csv_path, index=False)
 
     # Top confusion pairs
     confusion_rows = []
     for (gt, pred), cnt in confusion_counter.most_common():
         pair_df = df[(df["true_label"] == gt) & (df["concat_pred"] == pred)]
-        confusion_rows.append({
+        row = {
             "true_label": int(gt),
             "concat_pred": int(pred),
             "count": int(cnt),
@@ -318,7 +374,14 @@ def main():
             "part4_acc_on_pair_samples": float(100.0 * pair_df["part4_correct"].mean()) if len(pair_df) > 0 else 0.0,
             "concat_acc_on_pair_samples": float(100.0 * pair_df["concat_correct"].mean()) if len(pair_df) > 0 else 0.0,
             "mean_concat_conf_on_pair_samples": float(pair_df["concat_conf"].mean()) if len(pair_df) > 0 else 0.0,
-        })
+        }
+
+        if has_gate:
+            row["mean_gate_global"] = float(pair_df["gate_global"].mean()) if len(pair_df) > 0 else 0.0
+            row["mean_gate_part2"] = float(pair_df["gate_part2"].mean()) if len(pair_df) > 0 else 0.0
+            row["mean_gate_part4"] = float(pair_df["gate_part4"].mean()) if len(pair_df) > 0 else 0.0
+
+        confusion_rows.append(row)
 
     confusion_df = pd.DataFrame(confusion_rows)
     if len(confusion_df) > 0:

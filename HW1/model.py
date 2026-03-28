@@ -21,14 +21,22 @@ class GeM(nn.Module):
 
 
 class SubCenterClassifier(nn.Module):
-    def __init__(self, in_features, num_classes, num_subcenters=3, scale=16.0, learn_scale=True):
+    def __init__(
+        self,
+        in_features,
+        num_classes,
+        num_subcenters=3,
+        scale=16.0,
+        learn_scale=True,
+    ):
         super().__init__()
         self.in_features = in_features
         self.num_classes = num_classes
         self.num_subcenters = num_subcenters
 
-        self.weight = nn.Parameter(torch.randn(
-            num_classes, num_subcenters, in_features))
+        self.weight = nn.Parameter(
+            torch.randn(num_classes, num_subcenters, in_features)
+        )
 
         if learn_scale:
             self.scale = nn.Parameter(torch.tensor(float(scale)))
@@ -70,6 +78,28 @@ class PMGHead(nn.Module):
         embed = self.proj(x)
         logits, logits_all = self.classifier(embed)
         return logits, embed, logits_all
+
+
+class BranchGate(nn.Module):
+    """
+    Learn sample-wise branch importance for:
+    [global, part2, part4]
+    """
+
+    def __init__(self, embed_dim, hidden_dim=128, dropout=0.1):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim * 3, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 3),
+        )
+
+    def forward(self, global_embed, part2_embed, part4_embed):
+        gate_input = torch.cat([global_embed, part2_embed, part4_embed], dim=1)
+        gate_logits = self.mlp(gate_input)          # [B, 3]
+        gate_weights = torch.softmax(gate_logits, dim=1)
+        return gate_logits, gate_weights
 
 
 class ImageClassificationModel(nn.Module):
@@ -117,18 +147,30 @@ class ImageClassificationModel(nn.Module):
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
 
-        # Pure PMG part4: keep 4x4 grid, change pooling type only
+        # Pure PMG part4: keep 4x4 grid, use Avg + Max
         self.pool_4_avg = nn.AdaptiveAvgPool2d((4, 4))
         self.pool_4_max = nn.AdaptiveMaxPool2d((4, 4))
 
         self.global_head = PMGHead(
-            512, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            512, embed_dim, num_classes, num_subcenters, dropout=0.2
+        )
         self.part2_head = PMGHead(
-            512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2
+        )
         self.part4_head = PMGHead(
-            512 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            512 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2
+        )
+
+        # New: branch-aware gating before final concat head
+        self.branch_gate = BranchGate(
+            embed_dim=embed_dim,
+            hidden_dim=128,
+            dropout=0.1,
+        )
+
         self.concat_head = PMGHead(
-            embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3)
+            embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3
+        )
 
         self._freeze_shallow_layers()
         self._init_new_layers()
@@ -149,6 +191,7 @@ class ImageClassificationModel(nn.Module):
             self.global_head,
             self.part2_head,
             self.part4_head,
+            self.branch_gate,
             self.concat_head,
         ]:
             for p in module.parameters():
@@ -163,6 +206,11 @@ class ImageClassificationModel(nn.Module):
                 elif isinstance(m, nn.BatchNorm2d):
                     nn.init.ones_(m.weight)
                     nn.init.zeros_(m.bias)
+
+        for m in self.branch_gate.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def check_parameters(self):
         total = sum(p.numel() for p in self.parameters())
@@ -179,19 +227,29 @@ class ImageClassificationModel(nn.Module):
             self.global_head,
             self.part2_head,
             self.part4_head,
+            self.branch_gate,
             self.concat_head,
         ]:
             head_params.extend(
                 [p for p in module.parameters() if p.requires_grad])
 
         return [
-            {"params": [p for p in self.layer2.parameters(
-            ) if p.requires_grad], "lr": lr_base * 0.1},
-            {"params": [p for p in self.layer3.parameters(
-            ) if p.requires_grad], "lr": lr_base * 0.5},
-            {"params": [p for p in self.layer4.parameters(
-            ) if p.requires_grad], "lr": lr_base * 1.0},
-            {"params": head_params, "lr": lr_base * 1.5},
+            {
+                "params": [p for p in self.layer2.parameters() if p.requires_grad],
+                "lr": lr_base * 0.1,
+            },
+            {
+                "params": [p for p in self.layer3.parameters() if p.requires_grad],
+                "lr": lr_base * 0.5,
+            },
+            {
+                "params": [p for p in self.layer4.parameters() if p.requires_grad],
+                "lr": lr_base * 1.0,
+            },
+            {
+                "params": head_params,
+                "lr": lr_base * 1.5,
+            },
         ]
 
     def forward_features(self, x):
@@ -204,7 +262,8 @@ class ImageClassificationModel(nn.Module):
         feat_l3_proj = self.proj_l3(feat_l3)
         feat_l4_proj = self.proj_l4(feat_l4)
         feat_l3_proj = F.adaptive_avg_pool2d(
-            feat_l3_proj, feat_l4_proj.shape[-2:])
+            feat_l3_proj, feat_l4_proj.shape[-2:]
+        )
         fused_map = self.fuse(torch.cat([feat_l3_proj, feat_l4_proj], dim=1))
 
         return feat_l2, feat_l3, feat_l4, fused_map
@@ -212,22 +271,40 @@ class ImageClassificationModel(nn.Module):
     def forward_pmg(self, x, return_attn=False):
         _, _, _, fused_map = self.forward_features(x)
 
+        # Global branch
         global_feat = self.gem(fused_map)
-        part2_feat = self.pool_2(fused_map).flatten(1)
+        global_logits, global_embed, global_logits_all = self.global_head(
+            global_feat)
 
+        # Part2 branch
+        part2_feat = self.pool_2(fused_map).flatten(1)
+        part2_logits, part2_embed, part2_logits_all = self.part2_head(
+            part2_feat)
+
+        # Part4 branch: Avg + Max
         part4_avg = self.pool_4_avg(fused_map)
         part4_max = self.pool_4_max(fused_map)
         part4_feat = (part4_avg + part4_max).flatten(1)
-
-        global_logits, global_embed, global_logits_all = self.global_head(
-            global_feat)
-        part2_logits, part2_embed, part2_logits_all = self.part2_head(
-            part2_feat)
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
             part4_feat)
 
+        # Branch-aware gating
+        gate_logits, gate_weights = self.branch_gate(
+            global_embed, part2_embed, part4_embed
+        )
+
+        wg = gate_weights[:, 0:1]
+        wp2 = gate_weights[:, 1:2]
+        wp4 = gate_weights[:, 2:3]
+
+        gated_global_embed = global_embed * wg
+        gated_part2_embed = part2_embed * wp2
+        gated_part4_embed = part4_embed * wp4
+
+        # Final concat branch
         concat_feat = torch.cat(
-            [global_embed, part2_embed, part4_embed], dim=1)
+            [gated_global_embed, gated_part2_embed, gated_part4_embed], dim=1
+        )
         concat_logits, concat_embed, concat_logits_all = self.concat_head(
             concat_feat)
 
@@ -236,17 +313,26 @@ class ImageClassificationModel(nn.Module):
             "part2_logits": part2_logits,
             "part4_logits": part4_logits,
             "concat_logits": concat_logits,
+
             "global_embed": global_embed,
             "part2_embed": part2_embed,
             "part4_embed": part4_embed,
             "concat_embed": concat_embed,
+
             "global_logits_all": global_logits_all,
             "part2_logits_all": part2_logits_all,
             "part4_logits_all": part4_logits_all,
             "concat_logits_all": concat_logits_all,
+
             "fused_map": fused_map,
             "part4_avg_map": part4_avg,
             "part4_max_map": part4_max,
+
+            "gate_logits": gate_logits,
+            "gate_weights": gate_weights,
+            "gated_global_embed": gated_global_embed,
+            "gated_part2_embed": gated_part2_embed,
+            "gated_part4_embed": gated_part4_embed,
         }
         return outputs
 
@@ -277,5 +363,7 @@ class ImageClassificationModel(nn.Module):
             count += 1
 
         if count == 0:
-            return torch.tensor(0.0, device=self.global_head.classifier.weight.device)
+            return torch.tensor(
+                0.0, device=self.global_head.classifier.weight.device
+            )
         return total_loss / count

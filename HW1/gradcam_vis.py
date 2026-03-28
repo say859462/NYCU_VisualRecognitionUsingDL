@@ -32,7 +32,7 @@ def _fmt_pred(name, probs, pred_idx):
     return f"{name}:{pred_idx} ({probs[pred_idx].item():.2f})"
 
 
-def compute_gradcam(model, input_tensor, target_module, target_logits):
+def compute_gradcam(model, input_tensor, target_module, target_logits_key):
     model.eval()
 
     activations = []
@@ -52,7 +52,7 @@ def compute_gradcam(model, input_tensor, target_module, target_logits):
         input_tensor = input_tensor.requires_grad_(True)
         outputs = model.forward_pmg(input_tensor)
 
-        logits = outputs[target_logits]
+        logits = outputs[target_logits_key]
         pred_idx = logits.argmax(dim=1).item()
         score = logits[:, pred_idx].sum()
 
@@ -71,7 +71,10 @@ def compute_gradcam(model, input_tensor, target_module, target_logits):
         cam = (weights * feat).sum(dim=1, keepdim=True)
         cam = F.relu(cam)
         cam = F.interpolate(
-            cam, size=input_tensor.shape[-2:], mode="bilinear", align_corners=False
+            cam,
+            size=input_tensor.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
         )
         cam = cam[0, 0].detach().cpu().numpy()
         cam = _normalize_map(cam)
@@ -99,7 +102,7 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    with open(args.config, "r") as f:
+    with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -143,7 +146,8 @@ def main():
             continue
 
         sampled_image_paths = random.sample(
-            all_images, min(args.num_samples_per_class, len(all_images))
+            all_images,
+            min(args.num_samples_per_class, len(all_images))
         )
 
         for img_path in sampled_image_paths:
@@ -158,15 +162,16 @@ def main():
                 model=model,
                 input_tensor=input_tensor.clone(),
                 target_module=model.fuse,
-                target_logits="concat_logits",
+                target_logits_key="concat_logits",
             )
 
-            # Fine branch Grad-CAM on proj_l3_fine
+            # Part4 Grad-CAM on the same fused_map
+            # because current Pure PMG part4 comes from fused_map -> 4x4 Avg+Max pooling
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
-                target_module=model.proj_l3_fine,
-                target_logits="part4_logits",
+                target_module=model.fuse,
+                target_logits_key="part4_logits",
             )
 
             with torch.no_grad():
@@ -209,12 +214,14 @@ def main():
 
             axes[2].imshow(part4_overlay)
             axes[2].axis("off")
-            axes[2].set_title("HR Fine Branch Grad-CAM")
+            axes[2].set_title("Part4 Grad-CAM")
 
-            save_name = f"hr_fine_{os.path.splitext(os.path.basename(img_path))[0]}.png"
+            save_name = f"pure_pmg_{os.path.splitext(os.path.basename(img_path))[0]}.png"
             plt.tight_layout()
-            plt.savefig(os.path.join(class_save_dir, save_name),
-                        bbox_inches="tight")
+            plt.savefig(
+                os.path.join(class_save_dir, save_name),
+                bbox_inches="tight"
+            )
             plt.close(fig)
 
 
