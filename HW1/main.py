@@ -54,6 +54,95 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         ]
 
 
+def get_train_geometry(epoch, config):
+    stage1_epochs = config.get("pmg_stage1_epochs", 4)
+    stage2_epochs = config.get("pmg_stage2_epochs", 4)
+
+    if epoch <= stage1_epochs + stage2_epochs:
+        return {
+            "resize": config.get("curriculum_stage12_resize", 576),
+            "crop": config.get("curriculum_stage12_crop", 448),
+            "tag": "stage12_small_crop"
+        }
+
+    return {
+        "resize": config.get("curriculum_stage3_resize", 640),
+        "crop": config.get("curriculum_stage3_crop", 576),
+        "tag": "stage3_large_crop"
+    }
+
+
+def build_train_transform(resize_size, crop_size):
+    return transforms.Compose([
+        transforms.Resize((resize_size, resize_size)),
+        transforms.RandomCrop(crop_size),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomAffine(
+            degrees=7,
+            translate=(0.02, 0.02),
+            scale=(0.98, 1.02),
+            shear=2,
+        ),
+        transforms.ColorJitter(
+            brightness=0.12,
+            contrast=0.12,
+            saturation=0.08,
+            hue=0.02,
+        ),
+        transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=0.3),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+
+
+def build_val_transform(eval_resize):
+    return transforms.Compose([
+        transforms.Resize((eval_resize, eval_resize)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+
+
+def build_train_loader(data_dir, batch_size, train_transform):
+    train_dataset = ImageDataset(
+        root_dir=data_dir,
+        split="train",
+        transform=train_transform,
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+    return train_dataset, train_loader
+
+
+def build_val_loader(data_dir, batch_size, val_transform):
+    val_dataset = ImageDataset(
+        root_dir=data_dir,
+        split="val",
+        transform=val_transform,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+    return val_dataset, val_loader
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./config.json")
@@ -76,65 +165,15 @@ def main():
 
     num_subcenters = config.get("num_subcenters", 3)
     embed_dim = config.get("embed_dim", 256)
+    eval_resize = config.get("eval_resize", 576)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_transform = transforms.Compose([
-        transforms.Resize((640, 640)),
-        transforms.RandomCrop(576),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomAffine(
-            degrees=7,
-            translate=(0.02, 0.02),
-            scale=(0.98, 1.02),
-            shear=2,
-        ),
-        transforms.ColorJitter(
-            brightness=0.12,
-            contrast=0.12,
-            saturation=0.08,
-            hue=0.02,
-        ),
-        transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=0.3),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
-    ])
-
-    val_transform = transforms.Compose([
-        transforms.Resize((576, 576)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
-    ])
-
-    train_dataset = ImageDataset(
-        root_dir=data_dir, split="train", transform=train_transform)
-    val_dataset = ImageDataset(
-        root_dir=data_dir, split="val", transform=val_transform)
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True
-    )
+    # validation/test/analyze 固定 576
+    val_transform = build_val_transform(eval_resize)
+    val_dataset, val_loader = build_val_loader(
+        data_dir, batch_size, val_transform)
 
     model = ImageClassificationModel(
         num_classes=num_classes,
@@ -196,10 +235,32 @@ def main():
 
     training_start_time = time.time()
 
+    current_loader_tag = None
+    train_dataset = None
+    train_loader = None
+
     try:
         for epoch in range(start_epoch, num_epochs):
             current_epoch = epoch + 1
             print(f"\n--- Epoch {current_epoch}/{num_epochs} ---")
+
+            geometry = get_train_geometry(current_epoch, config)
+
+            if current_loader_tag != geometry["tag"]:
+                train_transform = build_train_transform(
+                    resize_size=geometry["resize"],
+                    crop_size=geometry["crop"]
+                )
+                train_dataset, train_loader = build_train_loader(
+                    data_dir=data_dir,
+                    batch_size=batch_size,
+                    train_transform=train_transform
+                )
+                current_loader_tag = geometry["tag"]
+                print(
+                    f"🔁 Switched train geometry -> "
+                    f"Resize({geometry['resize']}) + RandomCrop({geometry['crop']})"
+                )
 
             train_stats = train_one_epoch(
                 model=model,
@@ -248,6 +309,10 @@ def main():
 
             print(stage_cfg["stage_name"])
             print(
+                f"Train geometry -> Resize({geometry['resize']}) + RandomCrop({geometry['crop']}) | "
+                f"Eval resize -> {eval_resize}"
+            )
+            print(
                 "Loss weights -> "
                 f"global: {stage_cfg['global_weight']:.2f}, "
                 f"part2: {stage_cfg['part2_weight']:.2f}, "
@@ -264,7 +329,7 @@ def main():
                 f"Val Concat Acc: {val_concat_acc:.2f}% | Val Router Acc: {val_router_acc:.2f}%"
             )
 
-            if router_weight_means is not None:
+            if router_weight_means is not None and stage_cfg.get("router_weight", 0.0) > 0:
                 print(
                     "Router mean weights -> "
                     f"global: {router_weight_means['global']:.3f}, "
@@ -328,7 +393,8 @@ def main():
         plot_training_curves(
             history["train_loss"], history["val_loss"],
             history["train_acc"], history["val_acc"],
-            save_path=os.path.join(plot_dir, "training_curves_router.png")
+            save_path=os.path.join(
+                plot_dir, "training_curves_router_curriculum.png")
         )
 
         if best_val_preds and best_val_labels:
@@ -336,14 +402,16 @@ def main():
                 best_val_preds,
                 best_val_labels,
                 num_classes=num_classes,
-                save_path=os.path.join(plot_dir, "error_dist_router.png")
+                save_path=os.path.join(
+                    plot_dir, "error_dist_router_curriculum.png")
             )
             plot_long_tail_accuracy(
                 train_labels=train_dataset.targets,
                 val_preds=best_val_preds,
                 val_labels=best_val_labels,
                 num_classes=num_classes,
-                save_path=os.path.join(plot_dir, "long_tail_acc_router.png")
+                save_path=os.path.join(
+                    plot_dir, "long_tail_acc_router_curriculum.png")
             )
 
     print(
