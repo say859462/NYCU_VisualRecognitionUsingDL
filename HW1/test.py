@@ -29,7 +29,8 @@ def main():
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    test_dataset = ImageDataset(root_dir=config["data_dir"], split="test", transform=test_transform)
+    test_dataset = ImageDataset(
+        root_dir=config["data_dir"], split="test", transform=test_transform)
     test_loader = DataLoader(
         test_dataset,
         batch_size=config["batch_size"],
@@ -43,9 +44,10 @@ def main():
         pretrained=False,
         num_subcenters=config.get("num_subcenters", 3),
         embed_dim=config.get("embed_dim", 256),
-        use_logit_router=config.get("use_logit_router", True),
+        use_logit_router=config.get("use_logit_router", False),
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
+        backbone_name=config.get("backbone_name", "res2net50_26w_4s"),
     ).to(device)
 
     model.load_state_dict(torch.load(model_path, map_location=device))
@@ -58,12 +60,14 @@ def main():
         for images, _ in test_loader:
             images = images.to(device, non_blocking=True)
             outputs = model.forward_pmg(images)
-            final_logits = outputs["router_logits"] if "router_logits" in outputs else outputs["concat_logits"]
+            final_logits = outputs["concat_logits"]
             preds = torch.argmax(final_logits, dim=1)
             all_predictions.extend(preds.cpu().tolist())
 
-    image_names = [os.path.splitext(os.path.basename(p))[0] for p in test_dataset.image_paths]
-    submission_df = pd.DataFrame({"image_name": image_names, "pred_label": all_predictions})
+    image_names = [os.path.splitext(os.path.basename(p))[0]
+                   for p in test_dataset.image_paths]
+    submission_df = pd.DataFrame(
+        {"image_name": image_names, "pred_label": all_predictions})
     submission_df.to_csv("prediction.csv", index=False)
     print("Submission CSV saved!")
 

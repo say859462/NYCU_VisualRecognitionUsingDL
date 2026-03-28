@@ -1,6 +1,6 @@
 {
   "batch_size": 32,
-  "num_epochs": 25,
+  "num_epochs": 30,
   "learning_rate": 8e-5,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
@@ -9,6 +9,8 @@
   "best_loss_model_path": "./Model_Weight/best_loss_model.pth",
   "resume_training": false,
   "early_stopping_patience": 30,
+
+  "backbone_name": "res2net101_26w_4s",
   "num_subcenters": 3,
   "embed_dim": 256,
   "proto_diversity_weight": 0.0,
@@ -27,11 +29,11 @@
   "pmg_stage3_part4_weight": 0.5,
   "pmg_stage3_concat_weight": 1.0,
 
-  "use_logit_router": true,
+  "use_logit_router": false,
   "router_hidden_dim": 256,
   "router_dropout": 0.1,
-  "router_loss_weight": 1.0,
-  "router_balance_weight": 0.02,
+  "router_loss_weight": 0.0,
+  "router_balance_weight": 0.0,
 
   "curriculum_stage12_resize": 512,
   "curriculum_stage12_crop": 448,

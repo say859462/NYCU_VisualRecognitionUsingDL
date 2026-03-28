@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models
+import timm
 
 
 class GeM(nn.Module):
@@ -114,6 +114,7 @@ class SampleConditionedLogitRouter(nn.Module):
         p2_conf, p2_gap = self._max_prob_and_gap(part2_logits)
         p4_conf, p4_gap = self._max_prob_and_gap(part4_logits)
         c_conf, c_gap = self._max_prob_and_gap(concat_logits)
+
         router_input = torch.cat([
             global_logits.detach(),
             part2_logits.detach(),
@@ -122,6 +123,7 @@ class SampleConditionedLogitRouter(nn.Module):
             g_conf.detach(), p2_conf.detach(), p4_conf.detach(), c_conf.detach(),
             g_gap.detach(), p2_gap.detach(), p4_gap.detach(), c_gap.detach(),
         ], dim=1)
+
         stats = {
             "global_conf": g_conf.detach(),
             "part2_conf": p2_conf.detach(),
@@ -162,29 +164,38 @@ class ImageClassificationModel(nn.Module):
         pretrained=True,
         num_subcenters=3,
         embed_dim=256,
-        use_logit_router=True,
+        use_logit_router=False,
         router_hidden_dim=256,
         router_dropout=0.1,
+        backbone_name="res2net50_26w_4s",
     ):
         super().__init__()
 
-        resnet = models.resnet152(
-            weights=models.ResNet152_Weights.DEFAULT if pretrained else None
-        )
-
+        self.backbone_name = backbone_name
         self.use_logit_router = use_logit_router
 
-        self.stem = nn.Sequential(
-            resnet.conv1,
-            resnet.bn1,
-            resnet.relu,
-            resnet.maxpool,
+        backbone = timm.create_model(
+            backbone_name,
+            pretrained=pretrained,
+            num_classes=0,
+            global_pool=""
         )
-        self.layer1 = resnet.layer1
-        self.layer2 = resnet.layer2
-        self.layer3 = resnet.layer3
-        self.layer4 = resnet.layer4
 
+        # timm res2net/resnet-like stem
+        act1 = backbone.act1 if hasattr(backbone, "act1") else backbone.relu
+        self.stem = nn.Sequential(
+            backbone.conv1,
+            backbone.bn1,
+            act1,
+            backbone.maxpool,
+        )
+
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
+
+        # Res2Net50 stage channels: l3=1024, l4=2048
         self.proj_l3 = nn.Sequential(
             nn.Conv2d(1024, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),

@@ -180,11 +180,12 @@ def main():
         pretrained=True,
         num_subcenters=num_subcenters,
         embed_dim=embed_dim,
-        use_logit_router=config.get("use_logit_router", True),
+        use_logit_router=config.get("use_logit_router", False),
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
+        backbone_name=config.get("backbone_name", "res2net50_26w_4s"),
     ).to(device)
-
+    
     if not model.check_parameters():
         print("The number of parameters is greater than 100,000,000!")
         return
