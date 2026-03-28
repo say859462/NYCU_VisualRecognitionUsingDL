@@ -226,18 +226,7 @@ def main():
                 f"global: {stage_cfg['global_weight']:.2f}, "
                 f"part2: {stage_cfg['part2_weight']:.2f}, "
                 f"part4: {stage_cfg['part4_weight']:.2f}, "
-                f"fusion: {stage_cfg['fusion_weight']:.2f}"
-            )
-
-            with torch.no_grad():
-                fusion_w = torch.softmax(
-                    model.logit_fusion.fusion_logits_param, dim=0).detach().cpu().numpy()
-
-            print(
-                f"Fusion weights -> "
-                f"global: {fusion_w[0]:.3f}, "
-                f"part2: {fusion_w[1]:.3f}, "
-                f"part4: {fusion_w[2]:.3f}"
+                f"concat: {stage_cfg['concat_weight']:.2f}"
             )
 
             print(

@@ -61,7 +61,7 @@ def main():
         for images, _ in test_loader:
             images = images.to(device, non_blocking=True)
             outputs = model.forward_pmg(images)
-            preds = torch.argmax(outputs["fusion_logits"], dim=1)
+            preds = torch.argmax(outputs["concat_logits"], dim=1)
             all_predictions.extend(preds.cpu().tolist())
 
     image_names = [
