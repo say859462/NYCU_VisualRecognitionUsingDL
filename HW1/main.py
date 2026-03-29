@@ -106,6 +106,8 @@ def build_train_transform(resize_size, crop_size):
             p=0.3,
         ),
         transforms.ToTensor(),
+
+        transforms.RandomErasing(p=0.25, scale=(0.02, 0.08), ratio=(0.3, 3.3)),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],

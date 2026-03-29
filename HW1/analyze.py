@@ -65,7 +65,7 @@ def main():
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Analysis_ResNet152_PartialRes2Net_PMG",
+        default="./Plot/Analysis_ResNet152_PartialRes2Net_PMG_98th",
     )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resize", type=int, default=576)
