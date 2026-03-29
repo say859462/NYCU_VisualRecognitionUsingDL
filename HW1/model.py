@@ -1,3 +1,6 @@
+import math
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +9,7 @@ from torchvision.models import ResNet152_Weights
 
 
 class GeM(nn.Module):
-    def __init__(self, p=3.0, eps=1e-6, learn_p=True):
+    def __init__(self, p: float = 3.0, eps: float = 1e-6, learn_p: bool = True):
         super().__init__()
         if learn_p:
             self.p = nn.Parameter(torch.ones(1) * p)
@@ -14,82 +17,15 @@ class GeM(nn.Module):
             self.register_buffer("p", torch.tensor([p], dtype=torch.float32))
         self.eps = eps
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         p = torch.clamp(self.p, min=1.0)
         x = x.clamp(min=self.eps).pow(p)
         x = F.adaptive_avg_pool2d(x, 1).pow(1.0 / p)
         return x.flatten(1)
 
 
-class SubCenterClassifier(nn.Module):
-    def __init__(
-        self,
-        in_features,
-        num_classes,
-        num_subcenters=3,
-        scale=16.0,
-        learn_scale=True,
-    ):
-        super().__init__()
-        self.in_features = in_features
-        self.num_classes = num_classes
-        self.num_subcenters = num_subcenters
-
-        self.weight = nn.Parameter(
-            torch.randn(num_classes, num_subcenters, in_features)
-        )
-
-        if learn_scale:
-            self.scale = nn.Parameter(torch.tensor(float(scale)))
-        else:
-            self.register_buffer("scale", torch.tensor(float(scale)))
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.normal_(self.weight, mean=0.0, std=0.01)
-
-    def forward(self, x):
-        x = F.normalize(x, dim=1)
-        w = F.normalize(self.weight, dim=2)
-        logits_all = torch.einsum("bd,ckd->bck", x, w)
-        logits_all = logits_all * self.scale.clamp(min=1.0)
-        class_logits, _ = logits_all.max(dim=2)
-        return class_logits, logits_all
-
-
-class PMGHead(nn.Module):
-    def __init__(
-        self,
-        in_dim,
-        embed_dim,
-        num_classes,
-        num_subcenters=3,
-        dropout=0.2,
-    ):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(in_dim, embed_dim),
-            nn.BatchNorm1d(embed_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-        )
-        self.classifier = SubCenterClassifier(
-            in_features=embed_dim,
-            num_classes=num_classes,
-            num_subcenters=num_subcenters,
-            scale=16.0,
-            learn_scale=True,
-        )
-
-    def forward(self, x):
-        embed = self.proj(x)
-        logits, logits_all = self.classifier(embed)
-        return logits, embed, logits_all
-
-
 class Res2Adapter(nn.Module):
-    def __init__(self, channels, scale=4, bottleneck_ratio=4):
+    def __init__(self, channels: int, scale: int = 4, bottleneck_ratio: int = 4):
         super().__init__()
         assert scale >= 2
         inner_channels = channels // bottleneck_ratio
@@ -126,17 +62,17 @@ class Res2Adapter(nn.Module):
         )
         self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = x
         out = self.reduce(x)
         splits = torch.split(out, self.split_channels, dim=1)
 
         outputs = [splits[0]]
-        for i in range(1, self.scale):
-            if i == 1:
-                y = self.scale_convs[i - 1](splits[i])
+        for idx in range(1, self.scale):
+            if idx == 1:
+                y = self.scale_convs[idx - 1](splits[idx])
             else:
-                y = self.scale_convs[i - 1](splits[i] + outputs[i - 1])
+                y = self.scale_convs[idx - 1](splits[idx] + outputs[idx - 1])
             outputs.append(y)
 
         out = torch.cat(outputs, dim=1)
@@ -146,96 +82,57 @@ class Res2Adapter(nn.Module):
         return out
 
 
-class TinyFusionTransformer(nn.Module):
-    def __init__(self, embed_dim, num_heads=4, mlp_ratio=2.0, dropout=0.1):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.norm2 = nn.LayerNorm(embed_dim)
-
-        hidden_dim = int(embed_dim * mlp_ratio)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embed_dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        attn_input = self.norm1(x)
-        attn_out, attn_weights = self.attn(
-            attn_input,
-            attn_input,
-            attn_input,
-            need_weights=True,
-            average_attn_weights=True,
-        )
-        x = x + attn_out
-        x = x + self.mlp(self.norm2(x))
-        return x, attn_weights
-
-
-class SoftSpatialTokenFusionHead(nn.Module):
-    """
-    [CLS] + [global] + [part2 4 tokens] + [soft-weighted part4 16 tokens]
-
-    改動重點：
-    - 不再 hard top-k selection
-    - 改成 soft token weighting
-    - 仍保留 branch encoding + 2D positional encoding
-    """
-
+class SubCenterClassifier(nn.Module):
     def __init__(
         self,
-        embed_dim,
-        num_classes,
-        num_subcenters=3,
-        part2_in_channels=512,
-        part4_in_channels=256,
-        num_heads=4,
-        dropout=0.1,
+        in_features: int,
+        num_classes: int,
+        num_subcenters: int = 3,
+        scale: float = 16.0,
+        learn_scale: bool = True,
     ):
         super().__init__()
-        self.embed_dim = embed_dim
+        self.in_features = in_features
+        self.num_classes = num_classes
+        self.num_subcenters = num_subcenters
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
-        self.global_token_proj = nn.Identity()
-        self.part2_token_proj = nn.Linear(part2_in_channels, embed_dim)
-        self.part4_token_proj = nn.Linear(part4_in_channels, embed_dim)
-
-        self.part4_token_scorer = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, 1)
+        self.weight = nn.Parameter(
+            torch.randn(num_classes, num_subcenters, in_features)
         )
+        if learn_scale:
+            self.scale = nn.Parameter(torch.tensor(float(scale)))
+        else:
+            self.register_buffer("scale", torch.tensor(float(scale)))
+        self.reset_parameters()
 
-        self.branch_type_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.weight, mean=0.0, std=0.01)
 
-        self.cls_pos_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.global_pos_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = F.normalize(x, dim=1)
+        w = F.normalize(self.weight, dim=2)
+        logits_all = torch.einsum("bd,ckd->bck", x, w)
+        logits_all = logits_all * self.scale.clamp(min=1.0)
+        class_logits, _ = logits_all.max(dim=2)
+        return class_logits, logits_all
 
-        self.part2_row_embed = nn.Parameter(torch.zeros(2, embed_dim))
-        self.part2_col_embed = nn.Parameter(torch.zeros(2, embed_dim))
 
-        self.part4_row_embed = nn.Parameter(torch.zeros(4, embed_dim))
-        self.part4_col_embed = nn.Parameter(torch.zeros(4, embed_dim))
-
-        self.token_dropout = nn.Dropout(dropout)
-
-        self.fusion_block = TinyFusionTransformer(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            mlp_ratio=2.0,
-            dropout=dropout,
+class PMGHead(nn.Module):
+    def __init__(
+        self,
+        in_dim: int,
+        embed_dim: int,
+        num_classes: int,
+        num_subcenters: int = 3,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(in_dim, embed_dim),
+            nn.BatchNorm1d(embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
         )
-        self.final_norm = nn.LayerNorm(embed_dim)
-
         self.classifier = SubCenterClassifier(
             in_features=embed_dim,
             num_classes=num_classes,
@@ -244,135 +141,122 @@ class SoftSpatialTokenFusionHead(nn.Module):
             learn_scale=True,
         )
 
-        self.reset_parameters()
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        embed = self.proj(x)
+        logits, logits_all = self.classifier(embed)
+        return logits, embed, logits_all
 
-    def reset_parameters(self):
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.branch_type_embed, std=0.02)
 
-        nn.init.trunc_normal_(self.cls_pos_embed, std=0.02)
-        nn.init.trunc_normal_(self.global_pos_embed, std=0.02)
-
-        nn.init.trunc_normal_(self.part2_row_embed, std=0.02)
-        nn.init.trunc_normal_(self.part2_col_embed, std=0.02)
-
-        nn.init.trunc_normal_(self.part4_row_embed, std=0.02)
-        nn.init.trunc_normal_(self.part4_col_embed, std=0.02)
-
-        nn.init.trunc_normal_(self.part2_token_proj.weight, std=0.02)
-        nn.init.zeros_(self.part2_token_proj.bias)
-
-        nn.init.trunc_normal_(self.part4_token_proj.weight, std=0.02)
-        nn.init.zeros_(self.part4_token_proj.bias)
-
-        for m in self.part4_token_scorer.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                nn.init.zeros_(m.bias)
-
-    @staticmethod
-    def _build_2d_pos(row_embed, col_embed):
-        h, d = row_embed.shape
-        w, d2 = col_embed.shape
-        assert d == d2
-        pos = row_embed[:, None, :] + col_embed[None, :, :]
-        return pos.reshape(1, h * w, d)
-
-    def _soft_weight_part4_tokens(self, part4_tokens):
-        """
-        part4_tokens: [B, 16, D]
-        return:
-            weighted_tokens: [B, 16, D]
-            raw_scores: [B, 16]
-            weights: [B, 16] in [0,1]
-            preview_topk_idx: [B, 4]
-            preview_topk_scores: [B, 4]
-        """
-        raw_scores = self.part4_token_scorer(part4_tokens).squeeze(-1)   # [B,16]
-        weights = torch.sigmoid(raw_scores)                              # [B,16]
-
-        # 不要完全砍掉 token，保留一點 residual，避免 early collapse
-        token_scale = 0.20 + 0.80 * weights
-        weighted_tokens = part4_tokens * token_scale.unsqueeze(-1)
-
-        preview_topk_scores, preview_topk_idx = torch.topk(
-            weights, k=4, dim=1, largest=True, sorted=True
+class PairwiseInteractionFusionHead(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_classes: int,
+        num_subcenters: int = 3,
+        hidden_ratio: float = 2.0,
+        dropout: float = 0.25,
+    ):
+        super().__init__()
+        fusion_dim = embed_dim * 8
+        hidden_dim = int(embed_dim * hidden_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(fusion_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.BatchNorm1d(embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
         )
-        return weighted_tokens, raw_scores, weights, preview_topk_idx, preview_topk_scores
+        self.classifier = SubCenterClassifier(
+            in_features=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            scale=16.0,
+            learn_scale=True,
+        )
 
-    def forward(self, global_embed, part2_grid, part4_grid):
-        batch_size = global_embed.size(0)
+    def build_interactions(
+        self,
+        global_embed: torch.Tensor,
+        part2_embed: torch.Tensor,
+        part4_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        features = [
+            global_embed,
+            part2_embed,
+            part4_embed,
+            global_embed * part2_embed,
+            global_embed * part4_embed,
+            part2_embed * part4_embed,
+            torch.abs(global_embed - part2_embed),
+            torch.abs(global_embed - part4_embed),
+        ]
+        return torch.cat(features, dim=1)
 
-        cls_token = self.cls_token.expand(batch_size, -1, -1)       # [B,1,D]
-        global_token = self.global_token_proj(global_embed).unsqueeze(1)
+    def forward(
+        self,
+        global_embed: torch.Tensor,
+        part2_embed: torch.Tensor,
+        part4_embed: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        fusion_input = self.build_interactions(global_embed, part2_embed, part4_embed)
+        fusion_embed = self.mlp(fusion_input)
+        fusion_logits, fusion_logits_all = self.classifier(fusion_embed)
+        return fusion_logits, fusion_embed, fusion_logits_all, fusion_input
 
-        part2_tokens = part2_grid.flatten(2).transpose(1, 2)        # [B,4,512]
-        part2_tokens = self.part2_token_proj(part2_tokens)          # [B,4,D]
 
-        part4_tokens = part4_grid.flatten(2).transpose(1, 2)        # [B,16,256]
-        part4_tokens = self.part4_token_proj(part4_tokens)          # [B,16,D]
+class SupervisedContrastiveLoss(nn.Module):
+    def __init__(self, temperature: float = 0.10):
+        super().__init__()
+        self.temperature = temperature
 
-        cls_type = self.branch_type_embed[:, 0:1, :]
-        global_type = self.branch_type_embed[:, 1:2, :]
-        part2_type = self.branch_type_embed[:, 2:3, :]
-        part4_type = self.branch_type_embed[:, 3:4, :]
+    def forward(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        device = features.device
+        features = F.normalize(features, dim=1)
+        logits = torch.matmul(features, features.t()) / self.temperature
+        logits = logits - logits.max(dim=1, keepdim=True).values.detach()
 
-        cls_pos = self.cls_pos_embed
-        global_pos = self.global_pos_embed
-        part2_pos = self._build_2d_pos(self.part2_row_embed, self.part2_col_embed)
-        part4_pos = self._build_2d_pos(self.part4_row_embed, self.part4_col_embed)
+        labels = labels.view(-1, 1)
+        mask = torch.eq(labels, labels.t()).float().to(device)
+        logits_mask = torch.ones_like(mask) - torch.eye(mask.size(0), device=device)
+        mask = mask * logits_mask
 
-        cls_token = cls_token + cls_type + cls_pos
-        global_token = global_token + global_type + global_pos
-        part2_tokens = part2_tokens + part2_type + part2_pos
-        part4_tokens = part4_tokens + part4_type + part4_pos
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-8)
 
-        weighted_part4_tokens, raw_scores, part4_weights, preview_topk_idx, preview_topk_scores = \
-            self._soft_weight_part4_tokens(part4_tokens)
+        positive_count = mask.sum(dim=1)
+        valid = positive_count > 0
+        if not torch.any(valid):
+            return torch.zeros((), device=device, dtype=features.dtype)
 
-        tokens = torch.cat(
-            [cls_token, global_token, part2_tokens, weighted_part4_tokens],
-            dim=1,
-        )  # [B, 1+1+4+16, D]
-
-        tokens = self.token_dropout(tokens)
-        fused_tokens, attn_weights = self.fusion_block(tokens)
-
-        cls_embed = self.final_norm(fused_tokens[:, 0, :])
-        logits, logits_all = self.classifier(cls_embed)
-
-        aux = {
-            "part4_token_scores": raw_scores,
-            "part4_token_weights": part4_weights,
-            "part4_top4_preview_idx": preview_topk_idx,
-            "part4_top4_preview_scores": preview_topk_scores,
-        }
-        return logits, cls_embed, logits_all, fused_tokens, attn_weights, aux
+        mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (positive_count + 1e-8)
+        loss = -mean_log_prob_pos[valid].mean()
+        return loss
 
 
 class ImageClassificationModel(nn.Module):
     def __init__(
         self,
-        num_classes=100,
-        pretrained=True,
-        num_subcenters=3,
-        embed_dim=256,
-        use_logit_router=False,
-        router_hidden_dim=256,
-        router_dropout=0.1,
-        backbone_name="resnet152_partial_res2net",
+        num_classes: int = 100,
+        pretrained: bool = True,
+        num_subcenters: int = 3,
+        embed_dim: int = 256,
+        use_logit_router: bool = False,
+        router_hidden_dim: int = 256,
+        router_dropout: float = 0.1,
+        backbone_name: str = "resnet152_partial_res2net",
     ):
         super().__init__()
-
         del use_logit_router, router_hidden_dim, router_dropout
-
-        self.backbone_name = backbone_name
-
         if backbone_name != "resnet152_partial_res2net":
             raise ValueError(
-                f"Unsupported backbone_name: {backbone_name}. "
-                f"Expected 'resnet152_partial_res2net'."
+                "Only 'resnet152_partial_res2net' is supported in this implementation."
             )
+        self.backbone_name = backbone_name
+        self.num_classes = num_classes
+        self.embed_dim = embed_dim
 
         weights = ResNet152_Weights.IMAGENET1K_V2 if pretrained else None
         backbone = models.resnet152(weights=weights)
@@ -388,13 +272,8 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
-        self.layer3_res2 = nn.Sequential(
-            Res2Adapter(1024, scale=4, bottleneck_ratio=4),
-            Res2Adapter(1024, scale=4, bottleneck_ratio=4),
-        )
-        self.layer4_res2 = nn.Sequential(
-            Res2Adapter(2048, scale=4, bottleneck_ratio=4),
-        )
+        self.res2_layer3 = Res2Adapter(1024, scale=4, bottleneck_ratio=4)
+        self.res2_layer4 = Res2Adapter(2048, scale=4, bottleneck_ratio=4)
 
         self.global_proj = nn.Sequential(
             nn.Conv2d(2048, 512, kernel_size=1, bias=False),
@@ -402,13 +281,13 @@ class ImageClassificationModel(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.part2_proj = nn.Sequential(
-            nn.Conv2d(1024, 512, kernel_size=1, bias=False),
+            nn.Conv2d(2048, 512, kernel_size=1, bias=False),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
         )
         self.part4_proj = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=1, bias=False),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(1024, 512, kernel_size=1, bias=False),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
         )
 
@@ -432,60 +311,38 @@ class ImageClassificationModel(nn.Module):
             dropout=0.2,
         )
         self.part4_head = PMGHead(
-            in_dim=256 * 16,
+            in_dim=512 * 16,
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
             dropout=0.2,
         )
-
-        self.concat_head = SoftSpatialTokenFusionHead(
+        self.concat_head = PairwiseInteractionFusionHead(
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
-            part2_in_channels=512,
-            part4_in_channels=256,
-            num_heads=4,
-            dropout=0.1,
+            hidden_ratio=2.0,
+            dropout=0.25,
         )
+
+        self.supcon_loss = SupervisedContrastiveLoss(temperature=0.10)
 
         self._freeze_shallow_layers()
         self._init_new_layers()
 
-    def _freeze_shallow_layers(self):
+    def _freeze_shallow_layers(self) -> None:
         for module in [self.stem, self.layer1]:
             for param in module.parameters():
                 param.requires_grad = False
 
-        trainable_modules = [
-            self.layer2,
-            self.layer3,
-            self.layer4,
-            self.layer3_res2,
-            self.layer4_res2,
+    def _init_new_layers(self) -> None:
+        for module in [
+            self.res2_layer3,
+            self.res2_layer4,
             self.global_proj,
             self.part2_proj,
             self.part4_proj,
-            self.gem,
-            self.global_head,
-            self.part2_head,
-            self.part4_head,
-            self.concat_head,
-        ]
-
-        for module in trainable_modules:
-            for param in module.parameters():
-                param.requires_grad = True
-
-    def _init_new_layers(self):
-        new_modules = [
-            self.layer3_res2,
-            self.layer4_res2,
-            self.global_proj,
-            self.part2_proj,
-            self.part4_proj,
-        ]
-        for module in new_modules:
+        ]:
             for submodule in module.modules():
                 if isinstance(submodule, nn.Conv2d):
                     nn.init.kaiming_normal_(
@@ -497,16 +354,15 @@ class ImageClassificationModel(nn.Module):
                     nn.init.ones_(submodule.weight)
                     nn.init.zeros_(submodule.bias)
 
-    def check_parameters(self):
+    def check_parameters(self) -> bool:
         total = sum(param.numel() for param in self.parameters())
-        print(f"Parameters : {total}")
+        print(f"Parameters: {total}")
         return total < 100_000_000
 
-    def get_parameter_groups(self, lr_base):
-        head_params = []
+    def get_parameter_groups(self, lr_base: float) -> List[Dict[str, object]]:
         head_modules = [
-            self.layer3_res2,
-            self.layer4_res2,
+            self.res2_layer3,
+            self.res2_layer4,
             self.global_proj,
             self.part2_proj,
             self.part4_proj,
@@ -516,6 +372,7 @@ class ImageClassificationModel(nn.Module):
             self.part4_head,
             self.concat_head,
         ]
+        head_params = []
         for module in head_modules:
             head_params.extend(
                 [param for param in module.parameters() if param.requires_grad]
@@ -523,15 +380,15 @@ class ImageClassificationModel(nn.Module):
 
         return [
             {
-                "params": [p for p in self.layer2.parameters() if p.requires_grad],
+                "params": [param for param in self.layer2.parameters() if param.requires_grad],
                 "lr": lr_base * 0.1,
             },
             {
-                "params": [p for p in self.layer3.parameters() if p.requires_grad],
+                "params": [param for param in self.layer3.parameters() if param.requires_grad],
                 "lr": lr_base * 0.5,
             },
             {
-                "params": [p for p in self.layer4.parameters() if p.requires_grad],
+                "params": [param for param in self.layer4.parameters() if param.requires_grad],
                 "lr": lr_base * 1.0,
             },
             {
@@ -540,106 +397,156 @@ class ImageClassificationModel(nn.Module):
             },
         ]
 
-    def forward_backbone(self, x):
+    def forward_backbone(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.stem(x)
         x = self.layer1(x)
-        feat_l2 = self.layer2(x)
-        feat_l3 = self.layer3(feat_l2)
-        feat_l3 = self.layer3_res2(feat_l3)
+        x = self.layer2(x)
+        feat_l3 = self.layer3(x)
+        feat_l3 = self.res2_layer3(feat_l3)
         feat_l4 = self.layer4(feat_l3)
-        feat_l4 = self.layer4_res2(feat_l4)
-        return feat_l2, feat_l3, feat_l4
+        feat_l4 = self.res2_layer4(feat_l4)
+        return feat_l3, feat_l4
 
-    def forward_features(self, x):
-        feat_l2, feat_l3, feat_l4 = self.forward_backbone(x)
+    @staticmethod
+    def _normalize_map(x: torch.Tensor) -> torch.Tensor:
+        x = x - x.amin(dim=(2, 3), keepdim=True)
+        x = x / (x.amax(dim=(2, 3), keepdim=True) + 1e-8)
+        return x
 
+    def build_attention_map(
+        self,
+        global_map: torch.Tensor,
+        part2_map: torch.Tensor,
+    ) -> torch.Tensor:
+        global_sal = self._normalize_map(global_map.mean(dim=1, keepdim=True))
+        part2_sal = self._normalize_map(part2_map.mean(dim=1, keepdim=True))
+        saliency = 0.5 * global_sal + 0.5 * part2_sal
+        return self._normalize_map(saliency)
+
+    def build_background_mask(
+        self,
+        saliency: torch.Tensor,
+        threshold: float = 0.45,
+        floor: float = 0.25,
+    ) -> torch.Tensor:
+        mask = torch.clamp((saliency - threshold) / max(1e-6, 1.0 - threshold), min=0.0, max=1.0)
+        return floor + (1.0 - floor) * mask
+
+    def _build_global_feature(self, global_map: torch.Tensor) -> torch.Tensor:
+        return self.gem(global_map)
+
+    def _build_part2_feature(self, part2_map: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        part2_grid = self.pool_2(part2_map)
+        return part2_grid.flatten(1), part2_grid
+
+    def _build_part4_feature(self, part4_map: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        part4_avg = self.pool_4_avg(part4_map)
+        part4_max = self.pool_4_max(part4_map)
+        part4_grid = 0.5 * (part4_avg + part4_max)
+        return part4_grid.flatten(1), part4_grid
+
+    def forward_features(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        feat_l3, feat_l4 = self.forward_backbone(x)
         global_map = self.global_proj(feat_l4)
-        part2_map = self.part2_proj(feat_l3)
-        part4_map = self.part4_proj(feat_l2)
+        part2_map = self.part2_proj(feat_l4)
+        saliency = self.build_attention_map(global_map, part2_map)
+
+        bg_mask = self.build_background_mask(saliency)
+        bg_mask_l3 = F.interpolate(
+            bg_mask,
+            size=feat_l3.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        part4_source = feat_l3 * bg_mask_l3
+        part4_map = self.part4_proj(part4_source)
 
         return {
-            "feat_l2": feat_l2,
             "feat_l3": feat_l3,
             "feat_l4": feat_l4,
             "global_map": global_map,
             "part2_map": part2_map,
+            "part4_source": part4_source,
             "part4_map": part4_map,
+            "attention_map": saliency,
+            "bg_mask": bg_mask,
         }
 
-    def _build_global_feature(self, global_map):
-        return self.gem(global_map)
-
-    def _build_part2_grid(self, part2_map):
-        return self.pool_2(part2_map)
-
-    def _build_part4_grid(self, part4_map):
-        part4_avg = self.pool_4_avg(part4_map)
-        part4_max = self.pool_4_max(part4_map)
-        return 0.5 * (part4_avg + part4_max)
-
-    def forward_pmg(self, x):
+    def forward_pmg(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         feats = self.forward_features(x)
 
         global_feat = self._build_global_feature(feats["global_map"])
-        part2_grid = self._build_part2_grid(feats["part2_map"])
-        part4_grid = self._build_part4_grid(feats["part4_map"])
-
-        part2_feat = part2_grid.flatten(1)
-        part4_feat = part4_grid.flatten(1)
+        part2_feat, part2_grid = self._build_part2_feature(feats["part2_map"])
+        part4_feat, part4_grid = self._build_part4_feature(feats["part4_map"])
 
         global_logits, global_embed, global_logits_all = self.global_head(global_feat)
         part2_logits, part2_embed, part2_logits_all = self.part2_head(part2_feat)
         part4_logits, part4_embed, part4_logits_all = self.part4_head(part4_feat)
+        concat_logits, concat_embed, concat_logits_all, fusion_input = self.concat_head(
+            global_embed,
+            part2_embed,
+            part4_embed,
+        )
 
-        (
-            concat_logits,
-            concat_embed,
-            concat_logits_all,
-            fusion_tokens,
-            fusion_attn,
-            fusion_aux,
-        ) = self.concat_head(global_embed, part2_grid, part4_grid)
-
-        outputs = {
+        return {
             "global_logits": global_logits,
             "part2_logits": part2_logits,
             "part4_logits": part4_logits,
             "concat_logits": concat_logits,
-
             "global_embed": global_embed,
             "part2_embed": part2_embed,
             "part4_embed": part4_embed,
             "concat_embed": concat_embed,
-
             "global_logits_all": global_logits_all,
             "part2_logits_all": part2_logits_all,
             "part4_logits_all": part4_logits_all,
             "concat_logits_all": concat_logits_all,
-
-            "feat_l2": feats["feat_l2"],
-            "feat_l3": feats["feat_l3"],
-            "feat_l4": feats["feat_l4"],
-            "global_map": feats["global_map"],
-            "part2_map": feats["part2_map"],
-            "part4_map": feats["part4_map"],
-
             "part2_grid": part2_grid,
             "part4_grid": part4_grid,
-
-            "fusion_tokens": fusion_tokens,
-            "fusion_attn": fusion_attn,
-
-            "part4_token_scores": fusion_aux["part4_token_scores"],
-            "part4_token_weights": fusion_aux["part4_token_weights"],
-            "part4_top4_preview_idx": fusion_aux["part4_top4_preview_idx"],
-            "part4_top4_preview_scores": fusion_aux["part4_top4_preview_scores"],
+            "fusion_input": fusion_input,
+            **feats,
         }
-        return outputs
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         outputs = self.forward_pmg(x)
         return outputs["concat_logits"]
 
-    def prototype_diversity_loss(self):
-        device = next(self.parameters()).device
-        return torch.zeros(1, device=device, dtype=torch.float32).squeeze(0)
+    def compute_pairwise_ranking_loss(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        margin: float = 0.15,
+    ) -> torch.Tensor:
+        gt = logits.gather(1, labels.view(-1, 1))
+        masked_logits = logits.clone()
+        masked_logits.scatter_(1, labels.view(-1, 1), -1e9)
+        hardest_neg = masked_logits.max(dim=1, keepdim=True).values
+        loss = F.relu(margin - (gt - hardest_neg))
+        return loss.mean()
+
+    def compute_stage3_regularization(
+        self,
+        full_embed: torch.Tensor,
+        crop_embed: Optional[torch.Tensor],
+        labels: torch.Tensor,
+        crop_logits: Optional[torch.Tensor] = None,
+        supcon_weight: float = 0.0,
+        ranking_weight: float = 0.0,
+        ranking_margin: float = 0.15,
+    ) -> torch.Tensor:
+        device = full_embed.device
+        total_loss = torch.zeros((), device=device, dtype=full_embed.dtype)
+
+        if crop_embed is not None and supcon_weight > 0:
+            pair_features = torch.cat([full_embed, crop_embed], dim=0)
+            pair_labels = torch.cat([labels, labels], dim=0)
+            total_loss = total_loss + supcon_weight * self.supcon_loss(pair_features, pair_labels)
+
+        if crop_logits is not None and ranking_weight > 0:
+            total_loss = total_loss + ranking_weight * self.compute_pairwise_ranking_loss(
+                crop_logits,
+                labels,
+                margin=ranking_margin,
+            )
+
+        return total_loss

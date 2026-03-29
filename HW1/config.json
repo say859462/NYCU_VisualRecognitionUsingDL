@@ -2,39 +2,39 @@
   "batch_size": 16,
   "num_epochs": 30,
   "learning_rate": 0.0001,
+  "label_smoothing": 0.05,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
-  "checkpoint_path": "./Model_Weight/checkpoint.pth",
-  "best_model_path": "./Model_Weight/best_model.pth",
-  "best_loss_model_path": "./Model_Weight/best_loss_model.pth",
+  "checkpoint_path": "./Model_Weight/checkpoint_pairwise_crop.pth",
+  "best_model_path": "./Model_Weight/best_model_pairwise_crop.pth",
+  "best_loss_model_path": "./Model_Weight/best_loss_model_pairwise_crop.pth",
   "resume_training": false,
   "early_stopping_patience": 30,
+  "num_workers": 8,
 
   "backbone_name": "resnet152_partial_res2net",
   "num_subcenters": 3,
   "embed_dim": 256,
-  "proto_diversity_weight": 0.0,
 
   "pmg_stage1_epochs": 4,
   "pmg_stage2_epochs": 4,
-
   "pmg_stage1_global_weight": 1.0,
-
   "pmg_stage2_global_weight": 1.0,
-  "pmg_stage2_part2_weight": 0.2,
-  "pmg_stage2_part4_weight": 0.0,
-  "pmg_stage2_concat_weight": 0.3,
-
+  "pmg_stage2_part2_weight": 0.3,
+  "pmg_stage2_concat_weight": 0.6,
   "pmg_stage3_global_weight": 0.2,
   "pmg_stage3_part2_weight": 0.1,
-  "pmg_stage3_part4_weight": 0.0,
   "pmg_stage3_concat_weight": 1.0,
 
-  "use_logit_router": false,
-  "router_hidden_dim": 256,
-  "router_dropout": 0.1,
-  "router_loss_weight": 0.0,
-  "router_balance_weight": 0.0,
+  "crop_cls_weight_stage2": 0.15,
+  "consistency_weight_stage2": 0.10,
+  "crop_cls_weight_stage3": 0.15,
+  "consistency_weight_stage3": 0.10,
+  "consistency_temperature": 2.0,
+
+  "supcon_weight_stage3": 0.02,
+  "ranking_weight_stage3": 0.02,
+  "ranking_margin": 0.15,
 
   "curriculum_stage12_resize": 512,
   "curriculum_stage12_crop": 448,
@@ -42,8 +42,12 @@
   "curriculum_stage3_crop": 448,
   "eval_resize": 576,
 
-  "fusion_global_attn_cap": 0.90,
-  "fusion_global_attn_reg_weight": 0.01,
-  "fusion_local_attn_floor": 0.08,
-  "fusion_local_attn_reg_weight": 0.005
+  "local_crop_threshold": 0.50,
+  "local_crop_padding_ratio": 0.18,
+  "local_min_crop_ratio": 0.35,
+  "local_fallback_crop_ratio": 0.55,
+
+  "training_curve_path": "./Plot/training_curves_pairwise_crop.png",
+  "error_curve_path": "./Plot/error_dist_pairwise_crop.png",
+  "long_tail_curve_path": "./Plot/long_tail_pairwise_crop.png"
 }
