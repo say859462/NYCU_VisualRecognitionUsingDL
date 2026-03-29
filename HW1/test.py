@@ -12,7 +12,7 @@ from model import ImageClassificationModel
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Final inference for Top-k part4 spatial-token fusion"
+        description="Final inference for soft spatial-token fusion"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
@@ -59,7 +59,6 @@ def main():
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
         backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
-        part4_topk=config.get("part4_topk", 4),
     ).to(device)
 
     state_dict = torch.load(model_path, map_location=device)
@@ -80,8 +79,7 @@ def main():
             all_predictions.extend(preds.cpu().tolist())
 
     image_names = [
-        test_dataset.image_paths[i].split(
-            "/")[-1].split("\\")[-1].rsplit(".", 1)[0]
+        test_dataset.image_paths[i].split("/")[-1].split("\\")[-1].rsplit(".", 1)[0]
         for i in range(len(test_dataset.image_paths))
     ]
 

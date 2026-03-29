@@ -58,9 +58,8 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int):
             "cls_attn_to_global",
             "cls_attn_to_part2_group_sum",
             "cls_attn_to_part4_group_sum",
-            "cls_attn_to_part2_group_max",
-            "cls_attn_to_part4_group_max",
-            "mean_selected_part4_score",
+            "mean_part4_token_weight",
+            "max_part4_token_weight",
         ]
         for col in optional_cols:
             if col in class_df.columns:
@@ -82,14 +81,14 @@ def dominant_source_from_scores(global_score, part2_score, part4_score):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed PMG analysis for Top-k part4 spatial-token fusion"
+        description="Detailed PMG analysis for soft spatial-token fusion"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Analysis_ResNet152_PartialRes2Net_TopKSpatialTokenFusion",
+        default="./Plot/Analysis_ResNet152_PartialRes2Net_SoftSpatialTokenFusion",
     )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resize", type=int, default=576)
@@ -133,7 +132,6 @@ def main():
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
         backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
-        part4_topk=config.get("part4_topk", 4),
     ).to(device)
 
     state_dict = torch.load(model_path, map_location=device)
@@ -157,7 +155,8 @@ def main():
         "part4_group": 0,
     }
 
-    selected_part4_hist = torch.zeros(16, dtype=torch.long)
+    soft_top1_hist = torch.zeros(16, dtype=torch.long)
+    soft_top4_hist = torch.zeros(16, dtype=torch.long)
 
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc="Analyzing"):
@@ -188,21 +187,21 @@ def main():
             all_labels.extend(labels.cpu().tolist())
 
             fusion_attn = outputs.get("fusion_attn", None)
-            selected_part4_idx = outputs.get("selected_part4_idx", None)
             part4_token_scores = outputs.get("part4_token_scores", None)
-            part4_topk_scores = outputs.get("part4_topk_scores", None)
+            part4_token_weights = outputs.get("part4_token_weights", None)
+            part4_top4_preview_idx = outputs.get("part4_top4_preview_idx", None)
 
-            if selected_part4_idx is not None:
-                for i in range(selected_part4_idx.size(0)):
-                    for idx in selected_part4_idx[i].detach().cpu().tolist():
-                        selected_part4_hist[idx] += 1
+            if part4_token_weights is not None:
+                top1_idx = torch.argmax(part4_token_weights, dim=1)
+                for idx in top1_idx.detach().cpu().tolist():
+                    soft_top1_hist[idx] += 1
+
+            if part4_top4_preview_idx is not None:
+                for i in range(part4_top4_preview_idx.size(0)):
+                    for idx in part4_top4_preview_idx[i].detach().cpu().tolist():
+                        soft_top4_hist[idx] += 1
 
             if fusion_attn is not None:
-                # token layout after top-k selection:
-                # 0: CLS
-                # 1: global
-                # 2~5: part2 tokens
-                # 6~(6+K-1): selected part4 tokens
                 cls_attn = fusion_attn[:, 0, :]
                 batch_sum = cls_attn.sum(dim=0).detach().cpu()
                 if fusion_cls_attn_sum is None:
@@ -241,25 +240,21 @@ def main():
                     "concat_top2_gap": safe_top2_gap(concat_prob[i]),
                 }
 
-                if selected_part4_idx is not None:
-                    idx_list = selected_part4_idx[i].detach().cpu().tolist()
-                    row["selected_part4_idx"] = ",".join(map(str, idx_list))
-
                 if part4_token_scores is not None:
                     token_scores_i = part4_token_scores[i].detach().cpu()
-                    row["part4_score_mean_all"] = float(
-                        token_scores_i.mean().item())
-                    row["part4_score_max_all"] = float(
-                        token_scores_i.max().item())
-                    row["part4_score_argmax_all"] = int(
-                        token_scores_i.argmax().item())
+                    row["part4_score_mean_all"] = float(token_scores_i.mean().item())
+                    row["part4_score_max_all"] = float(token_scores_i.max().item())
+                    row["part4_score_argmax_all"] = int(token_scores_i.argmax().item())
 
-                if part4_topk_scores is not None:
-                    topk_scores_i = part4_topk_scores[i].detach().cpu()
-                    row["mean_selected_part4_score"] = float(
-                        topk_scores_i.mean().item())
-                    row["max_selected_part4_score"] = float(
-                        topk_scores_i.max().item())
+                if part4_token_weights is not None:
+                    token_weights_i = part4_token_weights[i].detach().cpu()
+                    row["mean_part4_token_weight"] = float(token_weights_i.mean().item())
+                    row["max_part4_token_weight"] = float(token_weights_i.max().item())
+                    row["part4_weight_argmax_all"] = int(token_weights_i.argmax().item())
+
+                if part4_top4_preview_idx is not None:
+                    idx_list = part4_top4_preview_idx[i].detach().cpu().tolist()
+                    row["part4_top4_preview_idx"] = ",".join(map(str, idx_list))
 
                 if fusion_attn is not None:
                     cls_attn_i = fusion_attn[i, 0, :].detach().cpu()
@@ -271,20 +266,14 @@ def main():
                     part2_sum = float(part2_scores.sum().item())
                     part4_sum = float(part4_scores.sum().item())
 
-                    part2_mean = float(part2_scores.mean().item(
-                    )) if part2_scores.numel() > 0 else 0.0
-                    part4_mean = float(part4_scores.mean().item(
-                    )) if part4_scores.numel() > 0 else 0.0
+                    part2_mean = float(part2_scores.mean().item()) if part2_scores.numel() > 0 else 0.0
+                    part4_mean = float(part4_scores.mean().item()) if part4_scores.numel() > 0 else 0.0
 
-                    part2_max = float(part2_scores.max().item()
-                                      ) if part2_scores.numel() > 0 else 0.0
-                    part4_max = float(part4_scores.max().item()
-                                      ) if part4_scores.numel() > 0 else 0.0
+                    part2_max = float(part2_scores.max().item()) if part2_scores.numel() > 0 else 0.0
+                    part4_max = float(part4_scores.max().item()) if part4_scores.numel() > 0 else 0.0
 
-                    part2_top_idx = int(part2_scores.argmax(
-                    ).item()) if part2_scores.numel() > 0 else -1
-                    part4_top_idx = int(part4_scores.argmax(
-                    ).item()) if part4_scores.numel() > 0 else -1
+                    part2_top_idx = int(part2_scores.argmax().item()) if part2_scores.numel() > 0 else -1
+                    part4_top_idx = int(part4_scores.argmax().item()) if part4_scores.numel() > 0 else -1
 
                     dominant_source = dominant_source_from_scores(
                         global_score,
@@ -315,8 +304,7 @@ def main():
                 rows.append(row)
 
     df = pd.DataFrame(rows)
-    detailed_csv_path = os.path.join(
-        args.save_dir, "pmg_predictions_detailed.csv")
+    detailed_csv_path = os.path.join(args.save_dir, "pmg_predictions_detailed.csv")
     df.to_csv(detailed_csv_path, index=False)
 
     concat_error_df = df[df["concat_correct"] == 0]
@@ -390,11 +378,9 @@ def main():
         "high_conf_wrong_count_ge_0.7": int((concat_error_df["concat_conf"] >= 0.7).sum()),
     }
 
-    if "mean_selected_part4_score" in df.columns:
-        summary["mean_selected_part4_score"] = float(
-            df["mean_selected_part4_score"].mean())
-        summary["mean_max_selected_part4_score"] = float(
-            df["max_selected_part4_score"].mean())
+    if "mean_part4_token_weight" in df.columns:
+        summary["mean_part4_token_weight"] = float(df["mean_part4_token_weight"].mean())
+        summary["mean_max_part4_token_weight"] = float(df["max_part4_token_weight"].mean())
 
     if fusion_cls_attn_sum is not None and fusion_cls_attn_count > 0:
         mean_cls_attn = fusion_cls_attn_sum / fusion_cls_attn_count
@@ -417,16 +403,15 @@ def main():
         })
 
     for idx in range(16):
-        summary[f"selected_part4_token_{idx}_count"] = int(
-            selected_part4_hist[idx].item())
+        summary[f"soft_top1_part4_token_{idx}_count"] = int(soft_top1_hist[idx].item())
+        summary[f"soft_top4_part4_token_{idx}_count"] = int(soft_top4_hist[idx].item())
 
     summary_path = os.path.join(args.save_dir, "analysis_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     per_class_df = build_per_class_stats(df, config["num_classes"])
-    per_class_csv_path = os.path.join(
-        args.save_dir, "per_class_branch_stats.csv")
+    per_class_csv_path = os.path.join(args.save_dir, "per_class_branch_stats.csv")
     per_class_df.to_csv(per_class_csv_path, index=False)
 
     print(f"\n===== PMG Analysis ({model_path}) =====")

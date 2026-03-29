@@ -36,34 +36,21 @@ def _fmt_pred(name, probs, pred_idx):
     return f"{name}:{pred_idx} ({probs[pred_idx].item():.2f})"
 
 
-def _build_part4_score_grid(part4_token_scores: torch.Tensor) -> np.ndarray:
-    """
-    part4_token_scores: [16]
-    return: [4, 4] numpy
-    """
-    score_grid = part4_token_scores.detach().cpu().numpy().reshape(4, 4)
+def _build_part4_score_grid(part4_token_weights: torch.Tensor) -> np.ndarray:
+    score_grid = part4_token_weights.detach().cpu().numpy().reshape(4, 4)
     score_grid = _normalize_map(score_grid)
     return score_grid
 
 
-def _build_part4_selected_mask(selected_part4_idx: torch.Tensor) -> np.ndarray:
-    """
-    selected_part4_idx: [K]
-    return: [4, 4] numpy binary mask
-    """
+def _build_part4_top4_preview_mask(top4_idx: torch.Tensor) -> np.ndarray:
     mask = np.zeros((16,), dtype=np.float32)
-    for idx in selected_part4_idx.detach().cpu().tolist():
+    for idx in top4_idx.detach().cpu().tolist():
         mask[idx] = 1.0
     return mask.reshape(4, 4)
 
 
 def _upsample_grid_to_image(grid_4x4: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
-    """
-    grid_4x4: [4, 4]
-    return: [H, W]
-    """
-    tensor = torch.tensor(
-        grid_4x4, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    tensor = torch.tensor(grid_4x4, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
     up = F.interpolate(
         tensor,
         size=(out_h, out_w),
@@ -160,7 +147,7 @@ def main():
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Attention_Outputs/ResNet152_PartialRes2Net_TopKSpatialTokenFusion_GridVis",
+        default="./Plot/Attention_Outputs/ResNet152_PartialRes2Net_SoftSpatialTokenFusion_GridVis",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -186,7 +173,6 @@ def main():
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
         backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
-        part4_topk=config.get("part4_topk", 4),
     ).to(device)
 
     state_dict = torch.load(model_path, map_location=device)
@@ -235,7 +221,6 @@ def main():
             rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
             h, w = rgb_img.shape[:2]
 
-            # 1. final fusion viewed from global path
             fusion_global_cam, fusion_pred, fusion_probs, outputs = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -243,7 +228,6 @@ def main():
                 target_logits_key="concat_logits",
             )
 
-            # 2. final fusion viewed from part4 path
             fusion_part4_cam, _, _, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -251,7 +235,6 @@ def main():
                 target_logits_key="concat_logits",
             )
 
-            # 3. part4 branch CAM
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -260,29 +243,25 @@ def main():
             )
 
             with torch.no_grad():
-                global_probs = torch.softmax(
-                    outputs["global_logits"], dim=1)[0].cpu()
-                part2_probs = torch.softmax(
-                    outputs["part2_logits"], dim=1)[0].cpu()
+                global_probs = torch.softmax(outputs["global_logits"], dim=1)[0].cpu()
+                part2_probs = torch.softmax(outputs["part2_logits"], dim=1)[0].cpu()
 
                 global_pred = int(global_probs.argmax().item())
                 part2_pred = int(part2_probs.argmax().item())
 
                 fusion_attn = outputs.get("fusion_attn", None)
-                selected_part4_idx = outputs.get("selected_part4_idx", None)
-                part4_token_scores = outputs.get("part4_token_scores", None)
+                part4_token_weights = outputs.get("part4_token_weights", None)
+                part4_top4_preview_idx = outputs.get("part4_top4_preview_idx", None)
 
                 cls_attn_text = ""
-                selected_idx_text = ""
+                preview_text = ""
 
                 if fusion_attn is not None:
                     cls_attn = fusion_attn[0, 0, :].detach().cpu()
 
                     global_score = float(cls_attn[1].item())
-                    part2_mean = float(cls_attn[2:6].mean().item(
-                    )) if cls_attn[2:6].numel() > 0 else 0.0
-                    part4_mean = float(cls_attn[6:].mean().item(
-                    )) if cls_attn[6:].numel() > 0 else 0.0
+                    part2_mean = float(cls_attn[2:6].mean().item()) if cls_attn[2:6].numel() > 0 else 0.0
+                    part4_mean = float(cls_attn[6:].mean().item()) if cls_attn[6:].numel() > 0 else 0.0
 
                     cls_attn_text = (
                         f" | CLS attn -> "
@@ -292,43 +271,31 @@ def main():
                         f"P4mean:{part4_mean:.2f}"
                     )
 
-                if selected_part4_idx is not None:
-                    selected_idx_text = f" | P4-topk:{selected_part4_idx[0].detach().cpu().tolist()}"
+                if part4_top4_preview_idx is not None:
+                    preview_text = f" | P4-top4-preview:{part4_top4_preview_idx[0].detach().cpu().tolist()}"
 
-                if part4_token_scores is not None:
-                    part4_score_grid = _build_part4_score_grid(
-                        part4_token_scores[0])
+                if part4_token_weights is not None:
+                    part4_score_grid = _build_part4_score_grid(part4_token_weights[0])
                 else:
                     part4_score_grid = np.zeros((4, 4), dtype=np.float32)
 
-                if selected_part4_idx is not None:
-                    part4_selected_mask = _build_part4_selected_mask(
-                        selected_part4_idx[0])
+                if part4_top4_preview_idx is not None:
+                    part4_preview_mask = _build_part4_top4_preview_mask(part4_top4_preview_idx[0])
                 else:
-                    part4_selected_mask = np.zeros((4, 4), dtype=np.float32)
+                    part4_preview_mask = np.zeros((4, 4), dtype=np.float32)
 
-            fusion_global_overlay = _overlay_heatmap_on_image(
-                rgb_img, fusion_global_cam, alpha=0.45)
-            fusion_part4_overlay = _overlay_heatmap_on_image(
-                rgb_img, fusion_part4_cam, alpha=0.45)
-            part4_overlay = _overlay_heatmap_on_image(
-                rgb_img, part4_cam, alpha=0.45)
+            fusion_global_overlay = _overlay_heatmap_on_image(rgb_img, fusion_global_cam, alpha=0.45)
+            fusion_part4_overlay = _overlay_heatmap_on_image(rgb_img, fusion_part4_cam, alpha=0.45)
+            part4_overlay = _overlay_heatmap_on_image(rgb_img, part4_cam, alpha=0.45)
 
-            # token score heatmap overlay
-            part4_score_map_img = _upsample_grid_to_image(
-                part4_score_grid, h, w)
-            part4_score_overlay = _overlay_heatmap_on_image(
-                rgb_img, part4_score_map_img, alpha=0.45)
+            part4_score_map_img = _upsample_grid_to_image(part4_score_grid, h, w)
+            part4_score_overlay = _overlay_heatmap_on_image(rgb_img, part4_score_map_img, alpha=0.45)
 
-            # selected token binary mask overlay
-            part4_selected_mask_img = _upsample_grid_to_image(
-                part4_selected_mask, h, w)
-            part4_selected_overlay = _overlay_heatmap_on_image(
-                rgb_img, part4_selected_mask_img, alpha=0.40)
+            part4_preview_mask_img = _upsample_grid_to_image(part4_preview_mask, h, w)
+            part4_preview_overlay = _overlay_heatmap_on_image(rgb_img, part4_preview_mask_img, alpha=0.40)
 
             fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-            title_color = "green" if str(
-                fusion_pred) == str(class_id) else "red"
+            title_color = "green" if str(fusion_pred) == str(class_id) else "red"
 
             fig.suptitle(
                 (
@@ -336,70 +303,61 @@ def main():
                     f"{_fmt_pred('G', global_probs, global_pred)} | "
                     f"{_fmt_pred('P2', part2_probs, part2_pred)} | "
                     f"{_fmt_pred('P4', part4_probs, part4_pred)} | "
-                    f"{_fmt_pred('TopKSpatialFusion', fusion_probs, fusion_pred)}"
+                    f"{_fmt_pred('SoftSpatialFusion', fusion_probs, fusion_pred)}"
                     f"{cls_attn_text}"
-                    f"{selected_idx_text}"
+                    f"{preview_text}"
                 ),
                 color=title_color,
                 fontweight="bold",
                 fontsize=13,
             )
 
-            # Row 1
             axes[0, 0].imshow(vis_img)
             axes[0, 0].axis("off")
             axes[0, 0].set_title(f"Original Resize{eval_resize}")
 
             axes[0, 1].imshow(fusion_global_overlay)
             axes[0, 1].axis("off")
-            axes[0, 1].set_title("TopKSpatialFusion CAM\n(hook: global_proj)")
+            axes[0, 1].set_title("SoftSpatialFusion CAM\n(hook: global_proj)")
 
             axes[0, 2].imshow(fusion_part4_overlay)
             axes[0, 2].axis("off")
-            axes[0, 2].set_title("TopKSpatialFusion CAM\n(hook: part4_proj)")
+            axes[0, 2].set_title("SoftSpatialFusion CAM\n(hook: part4_proj)")
 
             axes[0, 3].imshow(part4_overlay)
             axes[0, 3].axis("off")
             axes[0, 3].set_title("Part4 branch CAM\n(hook: part4_proj)")
 
-            # Row 2
             axes[1, 0].imshow(part4_score_overlay)
             axes[1, 0].axis("off")
-            axes[1, 0].set_title(
-                "Part4 token score heatmap\n(4x4 upsampled overlay)")
+            axes[1, 0].set_title("Part4 token weight heatmap\n(4x4 upsampled overlay)")
             _draw_grid_lines(axes[1, 0], h, w, rows=4, cols=4)
 
-            axes[1, 1].imshow(part4_selected_overlay)
+            axes[1, 1].imshow(part4_preview_overlay)
             axes[1, 1].axis("off")
-            axes[1, 1].set_title(
-                "Selected top-k token mask\n(4x4 upsampled overlay)")
+            axes[1, 1].set_title("Top-4 preview mask\n(from soft weights)")
             _draw_grid_lines(axes[1, 1], h, w, rows=4, cols=4)
 
-            im2 = axes[1, 2].imshow(
-                part4_score_grid, cmap="jet", vmin=0.0, vmax=1.0)
-            axes[1, 2].set_title("Part4 token score grid (4x4)")
+            im2 = axes[1, 2].imshow(part4_score_grid, cmap="jet", vmin=0.0, vmax=1.0)
+            axes[1, 2].set_title("Part4 token weight grid (4x4)")
             axes[1, 2].set_xticks(np.arange(4))
             axes[1, 2].set_yticks(np.arange(4))
-            _annotate_grid_scores(
-                axes[1, 2], part4_score_grid, color="white", fontsize=9)
+            _annotate_grid_scores(axes[1, 2], part4_score_grid, color="white", fontsize=9)
             plt.colorbar(im2, ax=axes[1, 2], fraction=0.046, pad=0.04)
 
-            im3 = axes[1, 3].imshow(
-                part4_selected_mask, cmap="gray", vmin=0.0, vmax=1.0)
-            axes[1, 3].set_title("Selected top-k binary mask (4x4)")
+            im3 = axes[1, 3].imshow(part4_preview_mask, cmap="gray", vmin=0.0, vmax=1.0)
+            axes[1, 3].set_title("Top-4 preview binary mask (4x4)")
             axes[1, 3].set_xticks(np.arange(4))
             axes[1, 3].set_yticks(np.arange(4))
-            _annotate_grid_scores(
-                axes[1, 3], part4_selected_mask, color="red", fontsize=10)
+            _annotate_grid_scores(axes[1, 3], part4_preview_mask, color="red", fontsize=10)
             plt.colorbar(im3, ax=axes[1, 3], fraction=0.046, pad=0.04)
 
             save_name = (
-                f"resnet152_partial_res2net_topk_spatial_token_fusion_gridvis_"
+                f"resnet152_partial_res2net_soft_spatial_token_fusion_gridvis_"
                 f"{os.path.splitext(os.path.basename(img_path))[0]}.png"
             )
             plt.tight_layout()
-            plt.savefig(os.path.join(class_save_dir, save_name),
-                        bbox_inches="tight", dpi=220)
+            plt.savefig(os.path.join(class_save_dir, save_name), bbox_inches="tight", dpi=220)
             plt.close(fig)
 
 

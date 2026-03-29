@@ -67,19 +67,19 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
 
 
 def get_train_geometry(epoch, config):
-    stage1_epochs = config.get("pmg_stage1_epochs", 6)
-    stage2_epochs = config.get("pmg_stage2_epochs", 6)
+    stage1_epochs = config.get("pmg_stage1_epochs", 4)
+    stage2_epochs = config.get("pmg_stage2_epochs", 4)
 
     if epoch <= stage1_epochs + stage2_epochs:
         return {
-            "resize": config.get("curriculum_stage12_resize", 576),
-            "crop": config.get("curriculum_stage12_crop", 512),
+            "resize": config.get("curriculum_stage12_resize", 512),
+            "crop": config.get("curriculum_stage12_crop", 448),
             "tag": "stage12_geometry",
         }
 
     return {
-        "resize": config.get("curriculum_stage3_resize", 576),
-        "crop": config.get("curriculum_stage3_crop", 512),
+        "resize": config.get("curriculum_stage3_resize", 512),
+        "crop": config.get("curriculum_stage3_crop", 448),
         "tag": "stage3_geometry",
     }
 
@@ -90,31 +90,20 @@ def build_train_transform(resize_size, crop_size):
         transforms.RandomCrop((crop_size, crop_size)),
         transforms.RandomHorizontalFlip(p=0.5),
 
-
         transforms.RandomApply([
             transforms.ColorJitter(
-                brightness=0.18,
-                contrast=0.18,
-                saturation=0.12,
-                hue=0.03,
+                brightness=0.15,
+                contrast=0.15,
+                saturation=0.10,
+                hue=0.02,
             )
-        ], p=0.5),
+        ], p=0.45),
+
         transforms.RandomApply([
-            transforms.RandomRotation(degrees=20)
-        ], p=0.25),
-        transforms.RandomApply([
-            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.2))
-        ], p=0.12),
+            transforms.RandomRotation(degrees=10)
+        ], p=0.15),
 
         transforms.ToTensor(),
-        transforms.RandomErasing(
-            p=0.10,
-            scale=(0.01, 0.04),
-            ratio=(0.5, 1.8),
-            value="random",
-            inplace=False,
-        ),
-
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
@@ -187,8 +176,6 @@ def main():
     best_model_path = config["best_model_path"]
     best_loss_model_path = config["best_loss_model_path"]
 
-    num_subcenters = config.get("num_subcenters", 3)
-    embed_dim = config.get("embed_dim", 256)
     eval_resize = config.get("eval_resize", 576)
 
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
@@ -210,9 +197,8 @@ def main():
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
         backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
-        part4_topk=config.get("part4_topk", 4),
     ).to(device)
-    
+
     if not model.check_parameters():
         print("The number of parameters is greater than 100,000,000!")
         return
@@ -258,14 +244,8 @@ def main():
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
         best_val_acc = checkpoint.get("best_val_acc", 0.0)
-        best_val_loss_for_acc = checkpoint.get(
-            "best_val_loss_for_acc",
-            float("inf"),
-        )
-        best_val_loss_only = checkpoint.get(
-            "best_val_loss_only",
-            float("inf"),
-        )
+        best_val_loss_for_acc = checkpoint.get("best_val_loss_for_acc", float("inf"))
+        best_val_loss_only = checkpoint.get("best_val_loss_only", float("inf"))
         history = checkpoint.get("history", history)
         epochs_no_improve = checkpoint.get("epochs_no_improve", 0)
         best_val_preds = checkpoint.get("best_val_preds", [])
@@ -327,24 +307,21 @@ def main():
             train_acc = train_stats["main_acc"]
             stage_cfg = train_stats["stage_cfg"]
             train_concat_acc = train_stats.get("concat_acc", train_acc)
-            train_router_acc = train_stats.get("router_acc", 0.0)
 
             val_loss = val_stats["loss"]
             val_acc = val_stats["main_acc"]
             val_preds = val_stats["preds"]
             val_labels = val_stats["labels"]
             val_concat_acc = val_stats.get("concat_acc", val_acc)
-            val_router_acc = val_stats.get("router_acc", 0.0)
-            router_weight_means = val_stats.get("router_weight_means", None)
 
             history["train_loss"].append(train_loss)
             history["train_acc"].append(train_acc)
             history["val_loss"].append(val_loss)
             history["val_acc"].append(val_acc)
             history["train_concat_acc"].append(train_concat_acc)
-            history["train_router_acc"].append(train_router_acc)
+            history["train_router_acc"].append(0.0)
             history["val_concat_acc"].append(val_concat_acc)
-            history["val_router_acc"].append(val_router_acc)
+            history["val_router_acc"].append(0.0)
 
             print(stage_cfg["stage_name"])
             print(
@@ -356,31 +333,19 @@ def main():
                 f"global: {stage_cfg['global_weight']:.2f}, "
                 f"part2: {stage_cfg['part2_weight']:.2f}, "
                 f"part4: {stage_cfg['part4_weight']:.2f}, "
-                f"concat: {stage_cfg['concat_weight']:.2f}, "
-                f"router: {stage_cfg.get('router_weight', 0.0):.2f}"
+                f"concat: {stage_cfg['concat_weight']:.2f}"
             )
             print(
                 f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
                 f"Train Loss: {train_loss:.4f} | Train Main Acc: {train_acc:.2f}% | "
-                f"Train Concat Acc: {train_concat_acc:.2f}% | Train Router Acc: {train_router_acc:.2f}% | "
+                f"Train Concat Acc: {train_concat_acc:.2f}% | "
                 f"Val Loss: {val_loss:.4f} | Val Main Acc: {val_acc:.2f}% | "
-                f"Val Concat Acc: {val_concat_acc:.2f}% | Val Router Acc: {val_router_acc:.2f}%"
+                f"Val Concat Acc: {val_concat_acc:.2f}%"
             )
-
-            if router_weight_means is not None and stage_cfg.get("router_weight", 0.0) > 0:
-                print(
-                    "Router mean weights -> "
-                    f"global: {router_weight_means['global']:.3f}, "
-                    f"part2: {router_weight_means['part2']:.3f}, "
-                    f"part4: {router_weight_means['part4']:.3f}, "
-                    f"concat: {router_weight_means['concat']:.3f}"
-                )
 
             improved = False
 
-            if val_acc > best_val_acc or (
-                val_acc == best_val_acc and val_loss < best_val_loss_for_acc
-            ):
+            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
                 best_val_acc = val_acc
                 best_val_loss_for_acc = val_loss
                 best_val_preds = val_preds
@@ -399,8 +364,7 @@ def main():
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-                print(
-                    f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
+                print(f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
 
             torch.save(
                 {
@@ -440,7 +404,7 @@ def main():
             history["val_acc"],
             save_path=os.path.join(
                 plot_dir,
-                "training_curves_res2net_pure_pmg_realignment_v1.png",
+                "training_curves_resnet152_partial_res2net_soft_fusion.png",
             ),
         )
 
@@ -451,7 +415,7 @@ def main():
                 num_classes=num_classes,
                 save_path=os.path.join(
                     plot_dir,
-                    "error_dist_res2net_pure_pmg_realignment_v1.png",
+                    "error_dist_resnet152_partial_res2net_soft_fusion.png",
                 ),
             )
             plot_long_tail_accuracy(
@@ -461,7 +425,7 @@ def main():
                 num_classes=num_classes,
                 save_path=os.path.join(
                     plot_dir,
-                    "long_tail_acc_res2net_pure_pmg_realignment_v1.png",
+                    "long_tail_acc_resnet152_partial_res2net_soft_fusion.png",
                 ),
             )
 
