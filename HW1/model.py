@@ -1,7 +1,14 @@
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
+
+from res2net_v1b import (
+    res2net50_v1b_26w_4s,
+    res2net101_v1b_26w_4s,
+    res2net152_v1b_26w_4s,
+)
 
 
 class GeM(nn.Module):
@@ -131,11 +138,11 @@ class LightweightBranchCrossAttention(nn.Module):
             value=kv,
             need_weights=True,
             average_attn_weights=True,
-        )                                                         # attn_out: [B, 1, D]
+        )
 
         refined = global_embed.unsqueeze(1) + self.attn_dropout(attn_out)
         refined = refined + self.ffn(self.ffn_norm(refined))
-        refined = refined.squeeze(1)                              # [B, D]
+        refined = refined.squeeze(1)
 
         return refined, attn_weights.squeeze(1)                   # [B, 2]
 
@@ -242,9 +249,31 @@ class SampleConditionedLogitRouter(nn.Module):
         return router_logits, routing_weights, stats
 
 
+def _build_official_res2net_v1b(backbone_name: str, pretrained: bool):
+    if backbone_name == "res2net50_v1b_26w_4s":
+        return res2net50_v1b_26w_4s(pretrained=pretrained)
+    if backbone_name == "res2net101_v1b_26w_4s":
+        return res2net101_v1b_26w_4s(pretrained=pretrained)
+    if backbone_name == "res2net152_v1b_26w_4s":
+        return res2net152_v1b_26w_4s(pretrained=pretrained)
+    raise ValueError(
+        f"Unsupported official Res2Net v1b backbone: {backbone_name}")
+
+
+def _build_backbone(backbone_name: str, pretrained: bool):
+    if "_v1b_" in backbone_name:
+        return _build_official_res2net_v1b(backbone_name, pretrained=pretrained)
+    return timm.create_model(
+        backbone_name,
+        pretrained=pretrained,
+        num_classes=0,
+        global_pool="",
+    )
+
+
 class ImageClassificationModel(nn.Module):
     """
-    Res2Net + PMG + Lightweight Cross-Attention Fusion
+    Res2Net/Res2Net_v1b + PMG + Lightweight Cross-Attention Fusion
 
     branch design:
     - global <- layer4
@@ -274,14 +303,17 @@ class ImageClassificationModel(nn.Module):
         self.backbone_name = backbone_name
         self.use_logit_router = use_logit_router
 
-        backbone = timm.create_model(
-            backbone_name,
-            pretrained=pretrained,
-            num_classes=0,
-            global_pool="",
-        )
+        backbone = _build_backbone(backbone_name, pretrained=pretrained)
 
-        act1 = backbone.act1 if hasattr(backbone, "act1") else backbone.relu
+        # official res2net_v1b.py:
+        # conv1 is nn.Sequential, followed by bn1 / relu / maxpool
+        # timm res2net:
+        # conv1 / bn1 / act1(or relu) / maxpool
+        if hasattr(backbone, "act1"):
+            act1 = backbone.act1
+        else:
+            act1 = backbone.relu
+
         self.stem = nn.Sequential(
             backbone.conv1,
             backbone.bn1,
@@ -294,6 +326,7 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
+        # Res2Net-50/101 and v1b variants:
         # layer3 -> 1024 channels
         # layer4 -> 2048 channels
         self.global_proj = nn.Sequential(

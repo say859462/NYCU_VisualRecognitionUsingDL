@@ -24,7 +24,7 @@ def _get_stage_weights(epoch, stage1_epochs, stage2_epochs, config):
         }
 
     return {
-        "stage_name": "Stage 3 | Pure PMG + lightweight cross-attention fusion",
+        "stage_name": "Stage 3 | Pure PMG + sample-conditioned logit router",
         "global_weight": config.get("pmg_stage3_global_weight", 1.0),
         "part2_weight": config.get("pmg_stage3_part2_weight", 0.5),
         "part4_weight": config.get("pmg_stage3_part4_weight", 0.5),
@@ -129,19 +129,23 @@ def train_one_epoch(model, train_loader, criterion, epoch, optimizer, device, sc
         total += batch_size
         running_loss += loss.item() * batch_size
 
+        # main acc
         logits_for_main = _get_eval_logits(outputs, stage_cfg)
         batch_main_correct, _ = _compute_batch_acc(logits_for_main, labels)
         main_correct += batch_main_correct
 
+        # concat acc
         batch_concat_correct, _ = _compute_batch_acc(
             outputs["concat_logits"], labels)
         concat_correct += batch_concat_correct
 
+        # router acc
         if "router_logits" in outputs:
             batch_router_correct, _ = _compute_batch_acc(
                 outputs["router_logits"], labels)
             router_correct += batch_router_correct
 
+        # router weights mean
         if "router_weights" in outputs:
             batch_router_mean = outputs["router_weights"].detach().mean(dim=0)
             if router_weight_sum is None:

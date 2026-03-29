@@ -10,7 +10,7 @@
   "resume_training": false,
   "early_stopping_patience": 30,
 
-  "backbone_name": "res2net101_26w_4s",
+  "backbone_name": "res2net101_v1b_26w_4s",
   "num_subcenters": 3,
   "embed_dim": 256,
   "proto_diversity_weight": 0.0,

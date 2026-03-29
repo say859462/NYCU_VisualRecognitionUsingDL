@@ -37,6 +37,19 @@ def _fmt_pred(name, probs, pred_idx):
 
 
 def compute_gradcam(model, input_tensor, target_module, target_logits_key):
+    """
+    Generic Grad-CAM for a chosen module and chosen logits head.
+
+    Args:
+        model: classification model
+        input_tensor: [1, C, H, W]
+        target_module: module to hook
+        target_logits_key: one of
+            - "global_logits"
+            - "part2_logits"
+            - "part4_logits"
+            - "concat_logits"
+    """
     model.eval()
     activations = []
     gradients = []
@@ -99,7 +112,7 @@ def main():
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Attention_Outputs/Res2Net_LW_CrossAttention",
+        default="./Plot/Attention_Outputs/94th",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -174,6 +187,9 @@ def main():
             input_tensor = preprocess_tensor(vis_img).unsqueeze(0).to(device)
             rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
 
+            # Concat Grad-CAM:
+            # hook global_proj because concat contains global branch contribution,
+            # and this usually gives stable semantic localization on the high-level map.
             concat_cam, concat_pred, concat_probs, outputs = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -181,6 +197,8 @@ def main():
                 target_logits_key="concat_logits",
             )
 
+            # Part4 Grad-CAM:
+            # hook part4_proj because part4 branch is now generated from layer3.
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -198,9 +216,15 @@ def main():
                 part2_pred = int(part2_probs.argmax().item())
 
             concat_overlay = _overlay_heatmap_on_image(
-                rgb_img, concat_cam, alpha=0.45)
+                rgb_img,
+                concat_cam,
+                alpha=0.45,
+            )
             part4_overlay = _overlay_heatmap_on_image(
-                rgb_img, part4_cam, alpha=0.45)
+                rgb_img,
+                part4_cam,
+                alpha=0.45,
+            )
 
             fig, axes = plt.subplots(1, 3, figsize=(18, 6))
             title_color = "green" if str(
@@ -232,7 +256,7 @@ def main():
             axes[2].set_title("Part4 Grad-CAM (hook: part4_proj)")
 
             save_name = (
-                f"res2net_lw_cross_attention_"
+                f"res2net_pure_pmg_realignment_v1_"
                 f"{os.path.splitext(os.path.basename(img_path))[0]}.png"
             )
             plt.tight_layout()

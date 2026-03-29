@@ -56,15 +56,18 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
             total += batch_size
             running_loss += loss.item() * batch_size
 
+            # main acc
             logits_for_main = _get_eval_logits(outputs, stage_cfg)
             batch_main_correct, preds = _compute_batch_acc(
                 logits_for_main, labels)
             main_correct += batch_main_correct
 
+            # concat acc
             batch_concat_correct, _ = _compute_batch_acc(
                 outputs["concat_logits"], labels)
             concat_correct += batch_concat_correct
 
+            # router acc
             if "router_logits" in outputs:
                 batch_router_correct, _ = _compute_batch_acc(
                     outputs["router_logits"], labels)
@@ -73,6 +76,7 @@ def validate_one_epoch(model, val_loader, criterion, device, config, epoch):
             all_preds.extend(preds.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
+            # router weights mean
             if "router_weights" in outputs:
                 batch_router_mean = outputs["router_weights"].detach().mean(
                     dim=0)

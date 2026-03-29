@@ -67,8 +67,8 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
 
 
 def get_train_geometry(epoch, config):
-    stage1_epochs = config.get("pmg_stage1_epochs", 4)
-    stage2_epochs = config.get("pmg_stage2_epochs", 4)
+    stage1_epochs = config.get("pmg_stage1_epochs", 6)
+    stage2_epochs = config.get("pmg_stage2_epochs", 6)
 
     if epoch <= stage1_epochs + stage2_epochs:
         return {
@@ -430,7 +430,7 @@ def main():
             history["val_acc"],
             save_path=os.path.join(
                 plot_dir,
-                "training_curves_res2net_lw_cross_attention.png",
+                "training_curves_res2net_pure_pmg_realignment_v1.png",
             ),
         )
 
@@ -441,7 +441,7 @@ def main():
                 num_classes=num_classes,
                 save_path=os.path.join(
                     plot_dir,
-                    "error_dist_res2net_lw_cross_attention.png",
+                    "error_dist_res2net_pure_pmg_realignment_v1.png",
                 ),
             )
             plot_long_tail_accuracy(
@@ -451,7 +451,7 @@ def main():
                 num_classes=num_classes,
                 save_path=os.path.join(
                     plot_dir,
-                    "long_tail_acc_res2net_lw_cross_attention.png",
+                    "long_tail_acc_res2net_pure_pmg_realignment_v1.png",
                 ),
             )
 
