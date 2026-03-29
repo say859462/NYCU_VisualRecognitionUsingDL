@@ -112,7 +112,7 @@ def main():
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Attention_Outputs/Res2Net_PurePMG_Realignment_v1",
+        default="./Plot/Attention_Outputs/94th",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
