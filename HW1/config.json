@@ -39,5 +39,7 @@
   "curriculum_stage12_crop": 448,
   "curriculum_stage3_resize": 512,
   "curriculum_stage3_crop": 448,
-  "eval_resize": 576
+  "eval_resize": 576,
+
+  "part4_topk": 4
 }

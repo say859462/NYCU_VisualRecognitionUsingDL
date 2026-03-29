@@ -87,25 +87,33 @@ def get_train_geometry(epoch, config):
 def build_train_transform(resize_size, crop_size):
     return transforms.Compose([
         transforms.Resize((resize_size, resize_size)),
-        transforms.RandomCrop(crop_size),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomAffine(
-            degrees=7,
-            translate=(0.02, 0.02),
-            scale=(0.98, 1.02),
-            shear=2,
-        ),
-        transforms.ColorJitter(
-            brightness=0.12,
-            contrast=0.12,
-            saturation=0.08,
-            hue=0.02,
-        ),
-        transforms.RandomAdjustSharpness(
-            sharpness_factor=1.5,
-            p=0.3,
-        ),
+        transforms.RandomCrop((crop_size, crop_size)),
+        transforms.RandomHorizontalFlip(p=0.5),
+
+
+        transforms.RandomApply([
+            transforms.ColorJitter(
+                brightness=0.18,
+                contrast=0.18,
+                saturation=0.12,
+                hue=0.03,
+            )
+        ], p=0.5),
+        transforms.RandomApply([
+            transforms.RandomRotation(degrees=20)
+        ], p=0.25),
+        transforms.RandomApply([
+            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.2))
+        ], p=0.12),
+
         transforms.ToTensor(),
+        transforms.RandomErasing(
+            p=0.10,
+            scale=(0.01, 0.04),
+            ratio=(0.5, 1.8),
+            value="random",
+            inplace=False,
+        ),
 
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -194,16 +202,17 @@ def main():
     )
 
     model = ImageClassificationModel(
-        num_classes=num_classes,
+        num_classes=config["num_classes"],
         pretrained=True,
-        num_subcenters=num_subcenters,
-        embed_dim=embed_dim,
+        num_subcenters=config.get("num_subcenters", 3),
+        embed_dim=config.get("embed_dim", 256),
         use_logit_router=config.get("use_logit_router", False),
         router_hidden_dim=config.get("router_hidden_dim", 256),
         router_dropout=config.get("router_dropout", 0.1),
-        backbone_name=config.get("backbone_name", "res2net50_26w_4s"),
+        backbone_name=config.get("backbone_name", "resnet152_partial_res2net"),
+        part4_topk=config.get("part4_topk", 4),
     ).to(device)
-
+    
     if not model.check_parameters():
         print("The number of parameters is greater than 100,000,000!")
         return

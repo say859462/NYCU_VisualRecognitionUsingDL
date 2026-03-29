@@ -89,15 +89,11 @@ class PMGHead(nn.Module):
 
 
 class Res2Adapter(nn.Module):
-    """
-    Partial Res2Net bottleneck adapter.
-    """
-
     def __init__(self, channels, scale=4, bottleneck_ratio=4):
         super().__init__()
-        assert scale >= 2, "scale must be >= 2"
+        assert scale >= 2
         inner_channels = channels // bottleneck_ratio
-        assert inner_channels % scale == 0, "inner_channels must be divisible by scale"
+        assert inner_channels % scale == 0
 
         self.scale = scale
         self.split_channels = inner_channels // scale
@@ -128,13 +124,11 @@ class Res2Adapter(nn.Module):
             nn.Conv2d(inner_channels, channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(channels),
         )
-
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
         identity = x
         out = self.reduce(x)
-
         splits = torch.split(out, self.split_channels, dim=1)
 
         outputs = [splits[0]]
@@ -153,10 +147,6 @@ class Res2Adapter(nn.Module):
 
 
 class TinyFusionTransformer(nn.Module):
-    """
-    1-layer tiny transformer for spatial-token fusion.
-    """
-
     def __init__(self, embed_dim, num_heads=4, mlp_ratio=2.0, dropout=0.1):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -191,15 +181,13 @@ class TinyFusionTransformer(nn.Module):
         return x, attn_weights
 
 
-class SpatialTokenFusionHead(nn.Module):
+class TopKSpatialTokenFusionHead(nn.Module):
     """
-    Spatial token fusion with:
+    [CLS] + [global] + [part2 4 tokens] + [selected part4 top-k tokens]
+    with:
     - explicit branch/type encoding
-    - 2D positional encoding for part2 (2x2) and part4 (4x4)
-
-    token layout:
-    [CLS] + [global] + [part2 2x2 => 4 tokens] + [part4 4x4 => 16 tokens]
-    total = 22 tokens
+    - 2D positional encoding
+    - learnable part4 token scorer
     """
 
     def __init__(
@@ -211,37 +199,34 @@ class SpatialTokenFusionHead(nn.Module):
         part4_in_channels=256,
         num_heads=4,
         dropout=0.1,
+        part4_topk=4,
     ):
         super().__init__()
-
         self.embed_dim = embed_dim
-        self.num_part2_tokens = 4
-        self.num_part4_tokens = 16
-        self.total_tokens = 1 + 1 + self.num_part2_tokens + self.num_part4_tokens
+        self.part4_topk = part4_topk
 
-        # --- token content ---
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
         self.global_token_proj = nn.Identity()
         self.part2_token_proj = nn.Linear(part2_in_channels, embed_dim)
         self.part4_token_proj = nn.Linear(part4_in_channels, embed_dim)
 
-        # --- explicit branch/type encoding ---
-        # index 0: CLS
-        # index 1: global
-        # index 2: part2
-        # index 3: part4
+        # part4 token scorer
+        self.part4_token_scorer = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, 1)
+        )
+
+        # branch/type encoding: CLS, global, part2, part4
         self.branch_type_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))
 
-        # --- positional encoding ---
-        # CLS / global use 1D token-specific positions
+        # positional encoding
         self.cls_pos_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.global_pos_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
-        # part2 uses 2D row/col positional encoding for 2x2 grid
         self.part2_row_embed = nn.Parameter(torch.zeros(2, embed_dim))
         self.part2_col_embed = nn.Parameter(torch.zeros(2, embed_dim))
 
-        # part4 uses 2D row/col positional encoding for 4x4 grid
         self.part4_row_embed = nn.Parameter(torch.zeros(4, embed_dim))
         self.part4_col_embed = nn.Parameter(torch.zeros(4, embed_dim))
 
@@ -267,7 +252,6 @@ class SpatialTokenFusionHead(nn.Module):
 
     def reset_parameters(self):
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-
         nn.init.trunc_normal_(self.branch_type_embed, std=0.02)
 
         nn.init.trunc_normal_(self.cls_pos_embed, std=0.02)
@@ -285,73 +269,81 @@ class SpatialTokenFusionHead(nn.Module):
         nn.init.trunc_normal_(self.part4_token_proj.weight, std=0.02)
         nn.init.zeros_(self.part4_token_proj.bias)
 
+        for m in self.part4_token_scorer.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                nn.init.zeros_(m.bias)
+
     @staticmethod
-    def _build_2d_pos(row_embed: torch.Tensor, col_embed: torch.Tensor):
-        """
-        row_embed: [H, D]
-        col_embed: [W, D]
-        return: [1, H*W, D]
-        """
+    def _build_2d_pos(row_embed, col_embed):
         h, d = row_embed.shape
         w, d2 = col_embed.shape
         assert d == d2
+        pos = row_embed[:, None, :] + col_embed[None, :, :]
+        return pos.reshape(1, h * w, d)
 
-        pos = row_embed[:, None, :] + col_embed[None, :, :]   # [H, W, D]
-        pos = pos.reshape(1, h * w, d)
-        return pos
+    def _select_topk_part4_tokens(self, part4_tokens):
+        """
+        part4_tokens: [B, 16, D]
+        return:
+            selected_tokens: [B, K, D]
+            selected_indices: [B, K]
+            token_scores: [B, 16]
+        """
+        scores = self.part4_token_scorer(part4_tokens).squeeze(-1)  # [B, 16]
+        topk_scores, topk_idx = torch.topk(
+            scores, k=self.part4_topk, dim=1, largest=True, sorted=True
+        )
+
+        idx_expand = topk_idx.unsqueeze(-1).expand(-1, -1,
+                                                   part4_tokens.size(-1))
+        selected_tokens = torch.gather(part4_tokens, dim=1, index=idx_expand)
+        return selected_tokens, topk_idx, scores, topk_scores
 
     def forward(self, global_embed, part2_grid, part4_grid):
-        """
-        global_embed: [B, D]
-        part2_grid:   [B, 512, 2, 2]
-        part4_grid:   [B, 256, 4, 4]
-        """
         batch_size = global_embed.size(0)
 
-        # --- build tokens ---
         cls_token = self.cls_token.expand(
-            batch_size, -1, -1)              # [B,1,D]
+            batch_size, -1, -1)               # [B,1,D]
         global_token = self.global_token_proj(
-            global_embed).unsqueeze(1)   # [B,1,D]
+            global_embed).unsqueeze(1)    # [B,1,D]
 
+        # part2 -> 4 tokens
         part2_tokens = part2_grid.flatten(2).transpose(
-            1, 2)               # [B,4,512]
+            1, 2)                # [B,4,512]
         part2_tokens = self.part2_token_proj(
-            part2_tokens)                 # [B,4,D]
+            part2_tokens)                  # [B,4,D]
 
+        # part4 -> 16 tokens
         part4_tokens = part4_grid.flatten(2).transpose(
-            1, 2)               # [B,16,256]
+            1, 2)                # [B,16,256]
         part4_tokens = self.part4_token_proj(
-            part4_tokens)                 # [B,16,D]
+            part4_tokens)                  # [B,16,D]
 
-        # --- build branch/type encoding ---
         cls_type = self.branch_type_embed[:, 0:1, :]
         global_type = self.branch_type_embed[:, 1:2, :]
         part2_type = self.branch_type_embed[:, 2:3, :]
         part4_type = self.branch_type_embed[:, 3:4, :]
 
-        # --- build positional encoding ---
-        # [1,1,D]
         cls_pos = self.cls_pos_embed
-        # [1,1,D]
         global_pos = self.global_pos_embed
-
         part2_pos = self._build_2d_pos(
             self.part2_row_embed, self.part2_col_embed)  # [1,4,D]
         part4_pos = self._build_2d_pos(
             self.part4_row_embed, self.part4_col_embed)  # [1,16,D]
 
-        # --- add type + position ---
         cls_token = cls_token + cls_type + cls_pos
         global_token = global_token + global_type + global_pos
         part2_tokens = part2_tokens + part2_type + part2_pos
         part4_tokens = part4_tokens + part4_type + part4_pos
 
-        # --- fuse ---
+        selected_part4_tokens, selected_idx, all_scores, topk_scores = self._select_topk_part4_tokens(
+            part4_tokens)
+
         tokens = torch.cat(
-            [cls_token, global_token, part2_tokens, part4_tokens],
+            [cls_token, global_token, part2_tokens, selected_part4_tokens],
             dim=1,
-        )  # [B,22,D]
+        )  # [B, 1+1+4+K, D]
 
         tokens = self.token_dropout(tokens)
         fused_tokens, attn_weights = self.fusion_block(tokens)
@@ -359,23 +351,15 @@ class SpatialTokenFusionHead(nn.Module):
         cls_embed = self.final_norm(fused_tokens[:, 0, :])
         logits, logits_all = self.classifier(cls_embed)
 
-        return logits, cls_embed, logits_all, fused_tokens, attn_weights
+        aux = {
+            "selected_part4_idx": selected_idx,
+            "part4_token_scores": all_scores,
+            "part4_topk_scores": topk_scores,
+        }
+        return logits, cls_embed, logits_all, fused_tokens, attn_weights, aux
 
 
 class ImageClassificationModel(nn.Module):
-    """
-    ResNet152 + partial Res2Net bottleneck adapters + PMG + spatial token fusion head
-
-    branch:
-    - global <- layer4
-    - part2  <- layer3
-    - part4  <- layer2
-
-    final fusion:
-    [CLS] + [global] + [part2 2x2 tokens] + [part4 4x4 tokens]
-    with explicit branch encoding + 2D positional encoding
-    """
-
     def __init__(
         self,
         num_classes=100,
@@ -386,13 +370,13 @@ class ImageClassificationModel(nn.Module):
         router_hidden_dim=256,
         router_dropout=0.1,
         backbone_name="resnet152_partial_res2net",
+        part4_topk=4,
     ):
         super().__init__()
 
-        del router_hidden_dim, router_dropout
+        del use_logit_router, router_hidden_dim, router_dropout
 
         self.backbone_name = backbone_name
-        self.use_logit_router = use_logit_router
 
         if backbone_name != "resnet152_partial_res2net":
             raise ValueError(
@@ -409,10 +393,10 @@ class ImageClassificationModel(nn.Module):
             backbone.relu,
             backbone.maxpool,
         )
-        self.layer1 = backbone.layer1   # 256
-        self.layer2 = backbone.layer2   # 512
-        self.layer3 = backbone.layer3   # 1024
-        self.layer4 = backbone.layer4   # 2048
+        self.layer1 = backbone.layer1
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
 
         self.layer3_res2 = nn.Sequential(
             Res2Adapter(1024, scale=4, bottleneck_ratio=4),
@@ -465,7 +449,7 @@ class ImageClassificationModel(nn.Module):
             dropout=0.2,
         )
 
-        self.concat_head = SpatialTokenFusionHead(
+        self.concat_head = TopKSpatialTokenFusionHead(
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
@@ -473,6 +457,7 @@ class ImageClassificationModel(nn.Module):
             part4_in_channels=256,
             num_heads=4,
             dropout=0.1,
+            part4_topk=part4_topk,
         )
 
         self._freeze_shallow_layers()
@@ -596,12 +581,12 @@ class ImageClassificationModel(nn.Module):
         return self.gem(global_map)
 
     def _build_part2_grid(self, part2_map):
-        return self.pool_2(part2_map)  # [B,512,2,2]
+        return self.pool_2(part2_map)
 
     def _build_part4_grid(self, part4_map):
         part4_avg = self.pool_4_avg(part4_map)
         part4_max = self.pool_4_max(part4_map)
-        return 0.5 * (part4_avg + part4_max)  # [B,256,4,4]
+        return 0.5 * (part4_avg + part4_max)
 
     def forward_pmg(self, x):
         feats = self.forward_features(x)
@@ -620,11 +605,14 @@ class ImageClassificationModel(nn.Module):
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
             part4_feat)
 
-        concat_logits, concat_embed, concat_logits_all, fusion_tokens, fusion_attn = self.concat_head(
-            global_embed,
-            part2_grid,
-            part4_grid,
-        )
+        (
+            concat_logits,
+            concat_embed,
+            concat_logits_all,
+            fusion_tokens,
+            fusion_attn,
+            fusion_aux,
+        ) = self.concat_head(global_embed, part2_grid, part4_grid)
 
         outputs = {
             "global_logits": global_logits,
@@ -654,6 +642,9 @@ class ImageClassificationModel(nn.Module):
 
             "fusion_tokens": fusion_tokens,
             "fusion_attn": fusion_attn,
+            "selected_part4_idx": fusion_aux["selected_part4_idx"],
+            "part4_token_scores": fusion_aux["part4_token_scores"],
+            "part4_topk_scores": fusion_aux["part4_topk_scores"],
         }
         return outputs
 
