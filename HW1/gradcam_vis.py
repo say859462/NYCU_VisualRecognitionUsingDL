@@ -38,17 +38,7 @@ def _fmt_pred(name, probs, pred_idx):
 
 def compute_gradcam(model, input_tensor, target_module, target_logits_key):
     """
-    Generic Grad-CAM for a chosen module and chosen logits head.
-
-    Args:
-        model: classification model
-        input_tensor: [1, C, H, W]
-        target_module: module to hook
-        target_logits_key: one of
-            - "global_logits"
-            - "part2_logits"
-            - "part4_logits"
-            - "concat_logits"
+    Generic Grad-CAM for a chosen spatial module and chosen logits head.
     """
     model.eval()
     activations = []
@@ -112,7 +102,7 @@ def main():
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Attention_Outputs/ResNet152_PartialRes2Net_PMG_99th",
+        default="./Plot/Attention_Outputs/ResNet152_PartialRes2Net_SpatialTokenFusion",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -187,17 +177,23 @@ def main():
             input_tensor = preprocess_tensor(vis_img).unsqueeze(0).to(device)
             rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
 
-            # Concat Grad-CAM:
-            # hook global_proj because concat includes the deepest semantic branch contribution.
-            concat_cam, concat_pred, concat_probs, outputs = compute_gradcam(
+            # final fusion viewed from global spatial path
+            fusion_global_cam, fusion_pred, fusion_probs, outputs = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
                 target_module=model.global_proj,
                 target_logits_key="concat_logits",
             )
 
-            # Part4 Grad-CAM:
-            # part4 branch now comes from layer2-derived feature map via part4_proj.
+            # final fusion viewed from part4 spatial path
+            fusion_part4_cam, _, _, _ = compute_gradcam(
+                model=model,
+                input_tensor=input_tensor.clone(),
+                target_module=model.part4_proj,
+                target_logits_key="concat_logits",
+            )
+
+            # part4 branch only
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
@@ -214,9 +210,26 @@ def main():
                 global_pred = int(global_probs.argmax().item())
                 part2_pred = int(part2_probs.argmax().item())
 
-            concat_overlay = _overlay_heatmap_on_image(
+                fusion_attn = outputs.get("fusion_attn", None)
+                cls_attn_text = ""
+                if fusion_attn is not None:
+                    cls_attn = fusion_attn[0, 0, :].detach().cpu()
+                    cls_attn_text = (
+                        f" | CLS attn -> "
+                        f"CLS:{cls_attn[0]:.2f}, "
+                        f"G:{cls_attn[1]:.2f}, "
+                        f"P2mean:{cls_attn[2:6].mean():.2f}, "
+                        f"P4mean:{cls_attn[6:22].mean():.2f}"
+                    )
+
+            fusion_global_overlay = _overlay_heatmap_on_image(
                 rgb_img,
-                concat_cam,
+                fusion_global_cam,
+                alpha=0.45,
+            )
+            fusion_part4_overlay = _overlay_heatmap_on_image(
+                rgb_img,
+                fusion_part4_cam,
                 alpha=0.45,
             )
             part4_overlay = _overlay_heatmap_on_image(
@@ -225,9 +238,9 @@ def main():
                 alpha=0.45,
             )
 
-            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            fig, axes = plt.subplots(1, 4, figsize=(24, 6))
             title_color = "green" if str(
-                concat_pred) == str(class_id) else "red"
+                fusion_pred) == str(class_id) else "red"
 
             fig.suptitle(
                 (
@@ -235,7 +248,8 @@ def main():
                     f"{_fmt_pred('G', global_probs, global_pred)} | "
                     f"{_fmt_pred('P2', part2_probs, part2_pred)} | "
                     f"{_fmt_pred('P4', part4_probs, part4_pred)} | "
-                    f"{_fmt_pred('Concat', concat_probs, concat_pred)}"
+                    f"{_fmt_pred('SpatialFusion', fusion_probs, fusion_pred)}"
+                    f"{cls_attn_text}"
                 ),
                 color=title_color,
                 fontweight="bold",
@@ -246,16 +260,20 @@ def main():
             axes[0].axis("off")
             axes[0].set_title(f"Original Resize{eval_resize}")
 
-            axes[1].imshow(concat_overlay)
+            axes[1].imshow(fusion_global_overlay)
             axes[1].axis("off")
-            axes[1].set_title("Concat Grad-CAM (hook: global_proj)")
+            axes[1].set_title("SpatialFusion CAM (hook: global_proj)")
 
-            axes[2].imshow(part4_overlay)
+            axes[2].imshow(fusion_part4_overlay)
             axes[2].axis("off")
-            axes[2].set_title("Part4 Grad-CAM (hook: part4_proj, from layer2)")
+            axes[2].set_title("SpatialFusion CAM (hook: part4_proj)")
+
+            axes[3].imshow(part4_overlay)
+            axes[3].axis("off")
+            axes[3].set_title("Part4 branch CAM (hook: part4_proj)")
 
             save_name = (
-                f"resnet152_partial_res2net_pmg_"
+                f"resnet152_partial_res2net_spatial_token_fusion_"
                 f"{os.path.splitext(os.path.basename(img_path))[0]}.png"
             )
             plt.tight_layout()

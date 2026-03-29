@@ -13,7 +13,7 @@ from model import ImageClassificationModel
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Final Inference for ResNet152 + partial Res2Net bottleneck PMG"
+        description="Final Inference for ResNet152 + partial Res2Net + spatial-token fusion"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
@@ -24,7 +24,11 @@ def main():
     with open(args.config, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    model_path = args.model_path if args.model_path is not None else config["best_model_path"]
+    model_path = (
+        args.model_path
+        if args.model_path is not None
+        else config["best_model_path"]
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     eval_resize = config.get("eval_resize", 576)

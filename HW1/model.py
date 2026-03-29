@@ -91,8 +91,6 @@ class PMGHead(nn.Module):
 class Res2Adapter(nn.Module):
     """
     Partial Res2Net bottleneck adapter.
-    插在 ResNet stage 後面做 multi-scale enhancement，
-    不是整條 backbone 重建，因此對既有預訓練 backbone 侵入較小。
     """
 
     def __init__(self, channels, scale=4, bottleneck_ratio=4):
@@ -156,7 +154,7 @@ class Res2Adapter(nn.Module):
 
 class TinyFusionTransformer(nn.Module):
     """
-    1-layer tiny transformer block for [CLS, global, part2, part4].
+    1-layer tiny transformer for spatial-token fusion.
     """
 
     def __init__(self, embed_dim, num_heads=4, mlp_ratio=2.0, dropout=0.1):
@@ -193,12 +191,15 @@ class TinyFusionTransformer(nn.Module):
         return x, attn_weights
 
 
-class CLSFusionHead(nn.Module):
+class SpatialTokenFusionHead(nn.Module):
     """
-    Final learned fusion head:
-    tokens = [CLS, global_embed, part2_embed, part4_embed]
-    1-layer tiny transformer
-    final logits come from CLS token only
+    Spatial token fusion with:
+    - explicit branch/type encoding
+    - 2D positional encoding for part2 (2x2) and part4 (4x4)
+
+    token layout:
+    [CLS] + [global] + [part2 2x2 => 4 tokens] + [part4 4x4 => 16 tokens]
+    total = 22 tokens
     """
 
     def __init__(
@@ -206,14 +207,44 @@ class CLSFusionHead(nn.Module):
         embed_dim,
         num_classes,
         num_subcenters=3,
+        part2_in_channels=512,
+        part4_in_channels=256,
         num_heads=4,
         dropout=0.1,
     ):
         super().__init__()
-        self.embed_dim = embed_dim
 
+        self.embed_dim = embed_dim
+        self.num_part2_tokens = 4
+        self.num_part4_tokens = 16
+        self.total_tokens = 1 + 1 + self.num_part2_tokens + self.num_part4_tokens
+
+        # --- token content ---
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))
+        self.global_token_proj = nn.Identity()
+        self.part2_token_proj = nn.Linear(part2_in_channels, embed_dim)
+        self.part4_token_proj = nn.Linear(part4_in_channels, embed_dim)
+
+        # --- explicit branch/type encoding ---
+        # index 0: CLS
+        # index 1: global
+        # index 2: part2
+        # index 3: part4
+        self.branch_type_embed = nn.Parameter(torch.zeros(1, 4, embed_dim))
+
+        # --- positional encoding ---
+        # CLS / global use 1D token-specific positions
+        self.cls_pos_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.global_pos_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        # part2 uses 2D row/col positional encoding for 2x2 grid
+        self.part2_row_embed = nn.Parameter(torch.zeros(2, embed_dim))
+        self.part2_col_embed = nn.Parameter(torch.zeros(2, embed_dim))
+
+        # part4 uses 2D row/col positional encoding for 4x4 grid
+        self.part4_row_embed = nn.Parameter(torch.zeros(4, embed_dim))
+        self.part4_col_embed = nn.Parameter(torch.zeros(4, embed_dim))
+
         self.token_dropout = nn.Dropout(dropout)
 
         self.fusion_block = TinyFusionTransformer(
@@ -236,41 +267,113 @@ class CLSFusionHead(nn.Module):
 
     def reset_parameters(self):
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-    def forward(self, global_embed, part2_embed, part4_embed):
+        nn.init.trunc_normal_(self.branch_type_embed, std=0.02)
+
+        nn.init.trunc_normal_(self.cls_pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.global_pos_embed, std=0.02)
+
+        nn.init.trunc_normal_(self.part2_row_embed, std=0.02)
+        nn.init.trunc_normal_(self.part2_col_embed, std=0.02)
+
+        nn.init.trunc_normal_(self.part4_row_embed, std=0.02)
+        nn.init.trunc_normal_(self.part4_col_embed, std=0.02)
+
+        nn.init.trunc_normal_(self.part2_token_proj.weight, std=0.02)
+        nn.init.zeros_(self.part2_token_proj.bias)
+
+        nn.init.trunc_normal_(self.part4_token_proj.weight, std=0.02)
+        nn.init.zeros_(self.part4_token_proj.bias)
+
+    @staticmethod
+    def _build_2d_pos(row_embed: torch.Tensor, col_embed: torch.Tensor):
+        """
+        row_embed: [H, D]
+        col_embed: [W, D]
+        return: [1, H*W, D]
+        """
+        h, d = row_embed.shape
+        w, d2 = col_embed.shape
+        assert d == d2
+
+        pos = row_embed[:, None, :] + col_embed[None, :, :]   # [H, W, D]
+        pos = pos.reshape(1, h * w, d)
+        return pos
+
+    def forward(self, global_embed, part2_grid, part4_grid):
+        """
+        global_embed: [B, D]
+        part2_grid:   [B, 512, 2, 2]
+        part4_grid:   [B, 256, 4, 4]
+        """
         batch_size = global_embed.size(0)
 
-        cls_token = self.cls_token.expand(batch_size, -1, -1)
-        branch_tokens = torch.stack(
-            [global_embed, part2_embed, part4_embed],
+        # --- build tokens ---
+        cls_token = self.cls_token.expand(
+            batch_size, -1, -1)              # [B,1,D]
+        global_token = self.global_token_proj(
+            global_embed).unsqueeze(1)   # [B,1,D]
+
+        part2_tokens = part2_grid.flatten(2).transpose(
+            1, 2)               # [B,4,512]
+        part2_tokens = self.part2_token_proj(
+            part2_tokens)                 # [B,4,D]
+
+        part4_tokens = part4_grid.flatten(2).transpose(
+            1, 2)               # [B,16,256]
+        part4_tokens = self.part4_token_proj(
+            part4_tokens)                 # [B,16,D]
+
+        # --- build branch/type encoding ---
+        cls_type = self.branch_type_embed[:, 0:1, :]
+        global_type = self.branch_type_embed[:, 1:2, :]
+        part2_type = self.branch_type_embed[:, 2:3, :]
+        part4_type = self.branch_type_embed[:, 3:4, :]
+
+        # --- build positional encoding ---
+        # [1,1,D]
+        cls_pos = self.cls_pos_embed
+        # [1,1,D]
+        global_pos = self.global_pos_embed
+
+        part2_pos = self._build_2d_pos(
+            self.part2_row_embed, self.part2_col_embed)  # [1,4,D]
+        part4_pos = self._build_2d_pos(
+            self.part4_row_embed, self.part4_col_embed)  # [1,16,D]
+
+        # --- add type + position ---
+        cls_token = cls_token + cls_type + cls_pos
+        global_token = global_token + global_type + global_pos
+        part2_tokens = part2_tokens + part2_type + part2_pos
+        part4_tokens = part4_tokens + part4_type + part4_pos
+
+        # --- fuse ---
+        tokens = torch.cat(
+            [cls_token, global_token, part2_tokens, part4_tokens],
             dim=1,
-        )
+        )  # [B,22,D]
 
-        tokens = torch.cat([cls_token, branch_tokens], dim=1)
-        tokens = self.token_dropout(tokens + self.pos_embed)
-
+        tokens = self.token_dropout(tokens)
         fused_tokens, attn_weights = self.fusion_block(tokens)
-        cls_embed = self.final_norm(fused_tokens[:, 0, :])
 
+        cls_embed = self.final_norm(fused_tokens[:, 0, :])
         logits, logits_all = self.classifier(cls_embed)
+
         return logits, cls_embed, logits_all, fused_tokens, attn_weights
 
 
 class ImageClassificationModel(nn.Module):
     """
-    ResNet152 + partial Res2Net bottleneck adapters + PMG + CLS fusion head
+    ResNet152 + partial Res2Net bottleneck adapters + PMG + spatial token fusion head
 
-    分支定義：
-    - global <- layer4 (+ res2 adapter)
-    - part2  <- layer3 (+ res2 adapter)
+    branch:
+    - global <- layer4
+    - part2  <- layer3
     - part4  <- layer2
 
-    最終融合：
-    - 不再直接 concat [global_embed, part2_embed, part4_embed]
-    - 改為 [CLS, global, part2, part4] 四個 token
-    - 經過 1 層 tiny transformer fusion
-    - 取 CLS token 作為最終 fused representation
+    final fusion:
+    [CLS] + [global] + [part2 2x2 tokens] + [part4 4x4 tokens]
+    with explicit branch encoding + 2D positional encoding
     """
 
     def __init__(
@@ -286,7 +389,6 @@ class ImageClassificationModel(nn.Module):
     ):
         super().__init__()
 
-        # 保留介面相容性
         del router_hidden_dim, router_dropout
 
         self.backbone_name = backbone_name
@@ -312,7 +414,6 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = backbone.layer3   # 1024
         self.layer4 = backbone.layer4   # 2048
 
-        # partial Res2Net enhancement
         self.layer3_res2 = nn.Sequential(
             Res2Adapter(1024, scale=4, bottleneck_ratio=4),
             Res2Adapter(1024, scale=4, bottleneck_ratio=4),
@@ -321,7 +422,6 @@ class ImageClassificationModel(nn.Module):
             Res2Adapter(2048, scale=4, bottleneck_ratio=4),
         )
 
-        # PMG branch projections
         self.global_proj = nn.Sequential(
             nn.Conv2d(2048, 512, kernel_size=1, bias=False),
             nn.BatchNorm2d(512),
@@ -343,7 +443,6 @@ class ImageClassificationModel(nn.Module):
         self.pool_4_avg = nn.AdaptiveAvgPool2d((4, 4))
         self.pool_4_max = nn.AdaptiveMaxPool2d((4, 4))
 
-        # branch heads
         self.global_head = PMGHead(
             in_dim=512,
             embed_dim=embed_dim,
@@ -352,25 +451,26 @@ class ImageClassificationModel(nn.Module):
             dropout=0.2,
         )
         self.part2_head = PMGHead(
-            in_dim=512 * 4,   # 2x2 pooled coarse feature
+            in_dim=512 * 4,
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
             dropout=0.2,
         )
         self.part4_head = PMGHead(
-            in_dim=256 * 16,  # 4x4 pooled fine feature
+            in_dim=256 * 16,
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
             dropout=0.2,
         )
 
-        # final fusion head: CLS token instead of direct concat
-        self.concat_head = CLSFusionHead(
+        self.concat_head = SpatialTokenFusionHead(
             embed_dim=embed_dim,
             num_classes=num_classes,
             num_subcenters=num_subcenters,
+            part2_in_channels=512,
+            part4_in_channels=256,
             num_heads=4,
             dropout=0.1,
         )
@@ -469,10 +569,10 @@ class ImageClassificationModel(nn.Module):
     def forward_backbone(self, x):
         x = self.stem(x)
         x = self.layer1(x)
-        feat_l2 = self.layer2(x)         # 512
-        feat_l3 = self.layer3(feat_l2)   # 1024
+        feat_l2 = self.layer2(x)
+        feat_l3 = self.layer3(feat_l2)
         feat_l3 = self.layer3_res2(feat_l3)
-        feat_l4 = self.layer4(feat_l3)   # 2048
+        feat_l4 = self.layer4(feat_l3)
         feat_l4 = self.layer4_res2(feat_l4)
         return feat_l2, feat_l3, feat_l4
 
@@ -495,37 +595,35 @@ class ImageClassificationModel(nn.Module):
     def _build_global_feature(self, global_map):
         return self.gem(global_map)
 
-    def _build_part2_feature(self, part2_map):
-        part2_grid = self.pool_2(part2_map)
-        return part2_grid.flatten(1)
+    def _build_part2_grid(self, part2_map):
+        return self.pool_2(part2_map)  # [B,512,2,2]
 
-    def _build_part4_feature(self, part4_map):
+    def _build_part4_grid(self, part4_map):
         part4_avg = self.pool_4_avg(part4_map)
         part4_max = self.pool_4_max(part4_map)
-        part4_grid = 0.5 * (part4_avg + part4_max)
-        return part4_grid.flatten(1)
+        return 0.5 * (part4_avg + part4_max)  # [B,256,4,4]
 
     def forward_pmg(self, x):
         feats = self.forward_features(x)
 
         global_feat = self._build_global_feature(feats["global_map"])
-        part2_feat = self._build_part2_feature(feats["part2_map"])
-        part4_feat = self._build_part4_feature(feats["part4_map"])
+        part2_grid = self._build_part2_grid(feats["part2_map"])
+        part4_grid = self._build_part4_grid(feats["part4_map"])
+
+        part2_feat = part2_grid.flatten(1)
+        part4_feat = part4_grid.flatten(1)
 
         global_logits, global_embed, global_logits_all = self.global_head(
-            global_feat
-        )
+            global_feat)
         part2_logits, part2_embed, part2_logits_all = self.part2_head(
-            part2_feat
-        )
+            part2_feat)
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
-            part4_feat
-        )
+            part4_feat)
 
         concat_logits, concat_embed, concat_logits_all, fusion_tokens, fusion_attn = self.concat_head(
             global_embed,
-            part2_embed,
-            part4_embed,
+            part2_grid,
+            part4_grid,
         )
 
         outputs = {
@@ -551,7 +649,9 @@ class ImageClassificationModel(nn.Module):
             "part2_map": feats["part2_map"],
             "part4_map": feats["part4_map"],
 
-            # optional analysis/debug
+            "part2_grid": part2_grid,
+            "part4_grid": part4_grid,
+
             "fusion_tokens": fusion_tokens,
             "fusion_attn": fusion_attn,
         }

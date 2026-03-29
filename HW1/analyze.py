@@ -43,7 +43,7 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int):
             })
             continue
 
-        rows.append({
+        row = {
             "class_id": class_id,
             "num_samples": int(len(class_df)),
             "global_acc": float(class_df["global_correct"].mean() * 100.0),
@@ -52,20 +52,43 @@ def build_per_class_stats(df: pd.DataFrame, num_classes: int):
             "concat_acc": float(class_df["concat_correct"].mean() * 100.0),
             "mean_concat_conf": float(class_df["concat_conf"].mean()),
             "mean_concat_top2_gap": float(class_df["concat_top2_gap"].mean()),
-        })
+        }
+
+        optional_cols = [
+            "cls_attn_to_global",
+            "cls_attn_to_part2_group_sum",
+            "cls_attn_to_part4_group_sum",
+            "cls_attn_to_part2_group_max",
+            "cls_attn_to_part4_group_max",
+        ]
+        for col in optional_cols:
+            if col in class_df.columns:
+                row[f"mean_{col}"] = float(class_df[col].mean())
+
+        rows.append(row)
+
     return pd.DataFrame(rows)
+
+
+def dominant_source_from_scores(global_score, part2_score, part4_score):
+    scores = {
+        "global": global_score,
+        "part2_group": part2_score,
+        "part4_group": part4_score,
+    }
+    return max(scores, key=scores.get)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detailed PMG analysis for ResNet152 + partial Res2Net bottleneck"
+        description="Detailed PMG analysis for ResNet152 + partial Res2Net + spatial-token fusion"
     )
     parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="./Plot/Analysis_ResNet152_PartialRes2Net_PMG_99th",
+        default="./Plot/Analysis_ResNet152_PartialRes2Net_SpatialTokenFusion",
     )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--resize", type=int, default=576)
@@ -127,6 +150,15 @@ def main():
     part4_preds = []
     concat_preds = []
 
+    fusion_cls_attn_sum = None
+    fusion_cls_attn_count = 0
+
+    dominant_source_counter = {
+        "global": 0,
+        "part2_group": 0,
+        "part4_group": 0,
+    }
+
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc="Analyzing"):
             images = images.to(device, non_blocking=True)
@@ -155,6 +187,20 @@ def main():
             concat_preds.extend(concat_pred.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
+            fusion_attn = outputs.get("fusion_attn", None)
+            if fusion_attn is not None:
+                # token layout:
+                # 0: CLS
+                # 1: global
+                # 2~5: part2 tokens (2x2 => 4)
+                # 6~21: part4 tokens (4x4 => 16)
+                cls_attn = fusion_attn[:, 0, :]  # [B, 22]
+                batch_sum = cls_attn.sum(dim=0).detach().cpu()
+                if fusion_cls_attn_sum is None:
+                    fusion_cls_attn_sum = torch.zeros_like(batch_sum)
+                fusion_cls_attn_sum += batch_sum
+                fusion_cls_attn_count += cls_attn.size(0)
+
             for i in range(labels.size(0)):
                 y = labels[i].item()
                 gp = global_pred[i].item()
@@ -162,7 +208,7 @@ def main():
                 p4 = part4_pred[i].item()
                 cp = concat_pred[i].item()
 
-                rows.append({
+                row = {
                     "true_label": y,
 
                     "global_pred": gp,
@@ -184,11 +230,57 @@ def main():
                     "part2_top2_gap": safe_top2_gap(part2_prob[i]),
                     "part4_top2_gap": safe_top2_gap(part4_prob[i]),
                     "concat_top2_gap": safe_top2_gap(concat_prob[i]),
-                })
+                }
+
+                if fusion_attn is not None:
+                    cls_attn_i = fusion_attn[i, 0, :].detach().cpu()
+
+                    global_score = float(cls_attn_i[1].item())
+                    part2_scores = cls_attn_i[2:6]
+                    part4_scores = cls_attn_i[6:22]
+
+                    part2_sum = float(part2_scores.sum().item())
+                    part4_sum = float(part4_scores.sum().item())
+
+                    part2_mean = float(part2_scores.mean().item())
+                    part4_mean = float(part4_scores.mean().item())
+
+                    part2_max = float(part2_scores.max().item())
+                    part4_max = float(part4_scores.max().item())
+
+                    part2_top_idx = int(part2_scores.argmax().item())   # 0~3
+                    part4_top_idx = int(part4_scores.argmax().item())   # 0~15
+
+                    dominant_source = dominant_source_from_scores(
+                        global_score,
+                        part2_sum,
+                        part4_sum,
+                    )
+                    dominant_source_counter[dominant_source] += 1
+
+                    row.update({
+                        "cls_attn_to_cls": float(cls_attn_i[0].item()),
+                        "cls_attn_to_global": global_score,
+
+                        "cls_attn_to_part2_group_sum": part2_sum,
+                        "cls_attn_to_part4_group_sum": part4_sum,
+
+                        "cls_attn_to_part2_group_mean": part2_mean,
+                        "cls_attn_to_part4_group_mean": part4_mean,
+
+                        "cls_attn_to_part2_group_max": part2_max,
+                        "cls_attn_to_part4_group_max": part4_max,
+
+                        "cls_attn_part2_top_token_idx": part2_top_idx,
+                        "cls_attn_part4_top_token_idx": part4_top_idx,
+
+                        "cls_attn_dominant_source": dominant_source,
+                    })
+
+                rows.append(row)
 
     df = pd.DataFrame(rows)
-    detailed_csv_path = os.path.join(
-        args.save_dir, "pmg_predictions_detailed.csv")
+    detailed_csv_path = os.path.join(args.save_dir, "pmg_predictions_detailed.csv")
     df.to_csv(detailed_csv_path, index=False)
 
     concat_error_df = df[df["concat_correct"] == 0]
@@ -268,13 +360,35 @@ def main():
         ),
     }
 
+    if fusion_cls_attn_sum is not None and fusion_cls_attn_count > 0:
+        mean_cls_attn = fusion_cls_attn_sum / fusion_cls_attn_count
+
+        summary.update({
+            "mean_cls_attn_to_cls": float(mean_cls_attn[0].item()),
+            "mean_cls_attn_to_global": float(mean_cls_attn[1].item()),
+
+            "mean_cls_attn_to_part2_group_sum": float(mean_cls_attn[2:6].sum().item()),
+            "mean_cls_attn_to_part4_group_sum": float(mean_cls_attn[6:22].sum().item()),
+
+            "mean_cls_attn_to_part2_group_mean": float(mean_cls_attn[2:6].mean().item()),
+            "mean_cls_attn_to_part4_group_mean": float(mean_cls_attn[6:22].mean().item()),
+
+            "mean_cls_attn_to_part2_group_max": float(mean_cls_attn[2:6].max().item()),
+            "mean_cls_attn_to_part4_group_max": float(mean_cls_attn[6:22].max().item()),
+        })
+
+        summary.update({
+            "dominant_source_global_count": dominant_source_counter["global"],
+            "dominant_source_part2_count": dominant_source_counter["part2_group"],
+            "dominant_source_part4_count": dominant_source_counter["part4_group"],
+        })
+
     summary_path = os.path.join(args.save_dir, "analysis_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     per_class_df = build_per_class_stats(df, config["num_classes"])
-    per_class_csv_path = os.path.join(
-        args.save_dir, "per_class_branch_stats.csv")
+    per_class_csv_path = os.path.join(args.save_dir, "per_class_branch_stats.csv")
     per_class_df.to_csv(per_class_csv_path, index=False)
 
     print(f"\n===== PMG Analysis ({model_path}) =====")
