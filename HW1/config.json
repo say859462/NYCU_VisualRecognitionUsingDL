@@ -1,7 +1,7 @@
 {
-  "batch_size": 32,
+  "batch_size": 16,
   "num_epochs": 30,
-  "learning_rate": 8e-5,
+  "learning_rate": 0.0001,
   "num_classes": 100,
   "data_dir": "./Dataset/data",
   "checkpoint_path": "./Model_Weight/checkpoint.pth",
@@ -35,9 +35,9 @@
   "router_loss_weight": 0.0,
   "router_balance_weight": 0.0,
 
-  "curriculum_stage12_resize": 512,
-  "curriculum_stage12_crop": 448,
-  "curriculum_stage3_resize": 512,
-  "curriculum_stage3_crop": 448,
+  "curriculum_stage12_resize": 576,
+  "curriculum_stage12_crop": 512,
+  "curriculum_stage3_resize": 576,
+  "curriculum_stage3_crop": 512,
   "eval_resize": 576
 }

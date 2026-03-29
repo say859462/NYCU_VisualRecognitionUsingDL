@@ -20,7 +20,11 @@ def _normalize_map(x: np.ndarray) -> np.ndarray:
     return x
 
 
-def _overlay_heatmap_on_image(rgb_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+def _overlay_heatmap_on_image(
+    rgb_img: np.ndarray,
+    heatmap: np.ndarray,
+    alpha: float = 0.45,
+) -> np.ndarray:
     cmap = plt.get_cmap("jet")
     heatmap_color = cmap(heatmap)[..., :3]
     overlay = (1 - alpha) * rgb_img + alpha * heatmap_color
@@ -33,6 +37,19 @@ def _fmt_pred(name, probs, pred_idx):
 
 
 def compute_gradcam(model, input_tensor, target_module, target_logits_key):
+    """
+    Generic Grad-CAM for a chosen module and chosen logits head.
+
+    Args:
+        model: classification model
+        input_tensor: [1, C, H, W]
+        target_module: module to hook
+        target_logits_key: one of
+            - "global_logits"
+            - "part2_logits"
+            - "part4_logits"
+            - "concat_logits"
+    """
     model.eval()
     activations = []
     gradients = []
@@ -49,24 +66,38 @@ def compute_gradcam(model, input_tensor, target_module, target_logits_key):
 
     try:
         input_tensor = input_tensor.requires_grad_(True)
+
         outputs = model.forward_pmg(input_tensor)
         logits = outputs[target_logits_key]
         pred_idx = logits.argmax(dim=1).item()
         score = logits[:, pred_idx].sum()
+
         model.zero_grad(set_to_none=True)
         score.backward()
 
+        if len(activations) == 0:
+            raise RuntimeError("No activations captured. Check target_module.")
+        if len(gradients) == 0:
+            raise RuntimeError("No gradients captured. Check target_module.")
+
         feat = activations[0]
         grad = gradients[0]
+
         weights = grad.mean(dim=(2, 3), keepdim=True)
         cam = (weights * feat).sum(dim=1, keepdim=True)
         cam = F.relu(cam)
         cam = F.interpolate(
-            cam, size=input_tensor.shape[-2:], mode="bilinear", align_corners=False)
+            cam,
+            size=input_tensor.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
         cam = cam[0, 0].detach().cpu().numpy()
         cam = _normalize_map(cam)
+
         probs = torch.softmax(logits, dim=1)[0].detach().cpu()
         return cam, pred_idx, probs, outputs
+
     finally:
         handle_fwd.remove()
         handle_bwd.remove()
@@ -78,8 +109,11 @@ def main():
     parser.add_argument("--val_dir", type=str, default="./Dataset/data/val")
     parser.add_argument("--num_samples_per_class", type=int, default=3)
     parser.add_argument("--model_path", type=str, default=None)
-    parser.add_argument("--save_dir", type=str,
-                        default="./Plot/Attention_Outputs/PurePMG_Res2Net50")
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="./Plot/Attention_Outputs/Res2Net_PurePMG_Realignment_v1",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -93,7 +127,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs(args.save_dir, exist_ok=True)
 
-    model_path = args.model_path if args.model_path is not None else config["best_model_path"]
+    model_path = (
+        args.model_path
+        if args.model_path is not None
+        else config["best_model_path"]
+    )
 
     model = ImageClassificationModel(
         num_classes=config["num_classes"],
@@ -109,12 +147,17 @@ def main():
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
+    eval_resize = config.get("eval_resize", 576)
+
     preprocess_geo = transforms.Compose([
-        transforms.Resize((576, 576))
+        transforms.Resize((eval_resize, eval_resize)),
     ])
     preprocess_tensor = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        transforms.Normalize(
+            [0.485, 0.456, 0.406],
+            [0.229, 0.224, 0.225],
+        ),
     ])
 
     for class_id in tqdm(range(config["num_classes"]), desc="Classes Processed"):
@@ -126,15 +169,16 @@ def main():
         os.makedirs(class_save_dir, exist_ok=True)
 
         all_images = [
-            os.path.join(class_dir, f)
-            for f in os.listdir(class_dir)
-            if f.lower().endswith((".jpg", ".png", ".jpeg"))
+            os.path.join(class_dir, file_name)
+            for file_name in os.listdir(class_dir)
+            if file_name.lower().endswith((".jpg", ".png", ".jpeg"))
         ]
         if not all_images:
             continue
 
         sampled_image_paths = random.sample(
-            all_images, min(args.num_samples_per_class, len(all_images))
+            all_images,
+            min(args.num_samples_per_class, len(all_images)),
         )
 
         for img_path in sampled_image_paths:
@@ -143,17 +187,22 @@ def main():
             input_tensor = preprocess_tensor(vis_img).unsqueeze(0).to(device)
             rgb_img = np.asarray(vis_img).astype(np.float32) / 255.0
 
+            # Concat Grad-CAM:
+            # hook global_proj because concat contains global branch contribution,
+            # and this usually gives stable semantic localization on the high-level map.
             concat_cam, concat_pred, concat_probs, outputs = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
-                target_module=model.fuse,
+                target_module=model.global_proj,
                 target_logits_key="concat_logits",
             )
 
+            # Part4 Grad-CAM:
+            # hook part4_proj because part4 branch is now generated from layer3.
             part4_cam, part4_pred, part4_probs, _ = compute_gradcam(
                 model=model,
                 input_tensor=input_tensor.clone(),
-                target_module=model.fuse,
+                target_module=model.part4_proj,
                 target_logits_key="part4_logits",
             )
 
@@ -162,13 +211,20 @@ def main():
                     outputs["global_logits"], dim=1)[0].cpu()
                 part2_probs = torch.softmax(
                     outputs["part2_logits"], dim=1)[0].cpu()
+
                 global_pred = int(global_probs.argmax().item())
                 part2_pred = int(part2_probs.argmax().item())
 
             concat_overlay = _overlay_heatmap_on_image(
-                rgb_img, concat_cam, alpha=0.45)
+                rgb_img,
+                concat_cam,
+                alpha=0.45,
+            )
             part4_overlay = _overlay_heatmap_on_image(
-                rgb_img, part4_cam, alpha=0.45)
+                rgb_img,
+                part4_cam,
+                alpha=0.45,
+            )
 
             fig, axes = plt.subplots(1, 3, figsize=(18, 6))
             title_color = "green" if str(
@@ -189,20 +245,25 @@ def main():
 
             axes[0].imshow(vis_img)
             axes[0].axis("off")
-            axes[0].set_title("Original Resize576")
+            axes[0].set_title(f"Original Resize{eval_resize}")
 
             axes[1].imshow(concat_overlay)
             axes[1].axis("off")
-            axes[1].set_title("Concat Grad-CAM")
+            axes[1].set_title("Concat Grad-CAM (hook: global_proj)")
 
             axes[2].imshow(part4_overlay)
             axes[2].axis("off")
-            axes[2].set_title("Part4 Grad-CAM")
+            axes[2].set_title("Part4 Grad-CAM (hook: part4_proj)")
 
-            save_name = f"pure_pmg_res2net50_{os.path.splitext(os.path.basename(img_path))[0]}.png"
+            save_name = (
+                f"res2net_pure_pmg_realignment_v1_"
+                f"{os.path.splitext(os.path.basename(img_path))[0]}.png"
+            )
             plt.tight_layout()
-            plt.savefig(os.path.join(class_save_dir, save_name),
-                        bbox_inches="tight")
+            plt.savefig(
+                os.path.join(class_save_dir, save_name),
+                bbox_inches="tight",
+            )
             plt.close(fig)
 
 

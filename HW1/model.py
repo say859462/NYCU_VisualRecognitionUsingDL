@@ -34,8 +34,9 @@ class SubCenterClassifier(nn.Module):
         self.num_classes = num_classes
         self.num_subcenters = num_subcenters
 
-        self.weight = nn.Parameter(torch.randn(
-            num_classes, num_subcenters, in_features))
+        self.weight = nn.Parameter(
+            torch.randn(num_classes, num_subcenters, in_features)
+        )
 
         if learn_scale:
             self.scale = nn.Parameter(torch.tensor(float(scale)))
@@ -57,7 +58,14 @@ class SubCenterClassifier(nn.Module):
 
 
 class PMGHead(nn.Module):
-    def __init__(self, in_dim, embed_dim, num_classes, num_subcenters=3, dropout=0.2):
+    def __init__(
+        self,
+        in_dim,
+        embed_dim,
+        num_classes,
+        num_subcenters=3,
+        dropout=0.2,
+    ):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Linear(in_dim, embed_dim),
@@ -96,10 +104,10 @@ class SampleConditionedLogitRouter(nn.Module):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        for m in self.mlp:
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
+        for module in self.mlp:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.zeros_(module.bias)
 
     @staticmethod
     def _max_prob_and_gap(logits):
@@ -109,20 +117,35 @@ class SampleConditionedLogitRouter(nn.Module):
         gap = top2[:, 0:1] - top2[:, 1:2]
         return max_prob, gap
 
-    def build_router_input(self, global_logits, part2_logits, part4_logits, concat_logits):
+    def build_router_input(
+        self,
+        global_logits,
+        part2_logits,
+        part4_logits,
+        concat_logits,
+    ):
         g_conf, g_gap = self._max_prob_and_gap(global_logits)
         p2_conf, p2_gap = self._max_prob_and_gap(part2_logits)
         p4_conf, p4_gap = self._max_prob_and_gap(part4_logits)
         c_conf, c_gap = self._max_prob_and_gap(concat_logits)
 
-        router_input = torch.cat([
-            global_logits.detach(),
-            part2_logits.detach(),
-            part4_logits.detach(),
-            concat_logits.detach(),
-            g_conf.detach(), p2_conf.detach(), p4_conf.detach(), c_conf.detach(),
-            g_gap.detach(), p2_gap.detach(), p4_gap.detach(), c_gap.detach(),
-        ], dim=1)
+        router_input = torch.cat(
+            [
+                global_logits.detach(),
+                part2_logits.detach(),
+                part4_logits.detach(),
+                concat_logits.detach(),
+                g_conf.detach(),
+                p2_conf.detach(),
+                p4_conf.detach(),
+                c_conf.detach(),
+                g_gap.detach(),
+                p2_gap.detach(),
+                p4_gap.detach(),
+                c_gap.detach(),
+            ],
+            dim=1,
+        )
 
         stats = {
             "global_conf": g_conf.detach(),
@@ -136,9 +159,18 @@ class SampleConditionedLogitRouter(nn.Module):
         }
         return router_input, stats
 
-    def forward(self, global_logits, part2_logits, part4_logits, concat_logits):
+    def forward(
+        self,
+        global_logits,
+        part2_logits,
+        part4_logits,
+        concat_logits,
+    ):
         router_input, stats = self.build_router_input(
-            global_logits, part2_logits, part4_logits, concat_logits
+            global_logits,
+            part2_logits,
+            part4_logits,
+            concat_logits,
         )
         routing_logits = self.mlp(router_input)
         routing_weights = torch.softmax(routing_logits, dim=1)
@@ -149,15 +181,27 @@ class SampleConditionedLogitRouter(nn.Module):
         wc = routing_weights[:, 3:4]
 
         router_logits = (
-            wg * global_logits +
-            wp2 * part2_logits +
-            wp4 * part4_logits +
-            wc * concat_logits
+            wg * global_logits
+            + wp2 * part2_logits
+            + wp4 * part4_logits
+            + wc * concat_logits
         )
         return router_logits, routing_weights, stats
 
 
 class ImageClassificationModel(nn.Module):
+    """
+    Res2Net Pure-PMG Realignment v1
+
+    Core idea:
+    - global branch: layer4
+    - part2 branch: layer4
+    - part4 branch: layer3
+    - concat head: concat(global_embed, part2_embed, part4_embed)
+
+    This avoids the previous design where all branches came from one fused map.
+    """
+
     def __init__(
         self,
         num_classes=100,
@@ -178,10 +222,9 @@ class ImageClassificationModel(nn.Module):
             backbone_name,
             pretrained=pretrained,
             num_classes=0,
-            global_pool=""
+            global_pool="",
         )
 
-        # timm res2net/resnet-like stem
         act1 = backbone.act1 if hasattr(backbone, "act1") else backbone.relu
         self.stem = nn.Sequential(
             backbone.conv1,
@@ -195,22 +238,28 @@ class ImageClassificationModel(nn.Module):
         self.layer3 = backbone.layer3
         self.layer4 = backbone.layer4
 
-        # Res2Net50 stage channels: l3=1024, l4=2048
-        self.proj_l3 = nn.Sequential(
-            nn.Conv2d(1024, 256, kernel_size=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-        )
-        self.proj_l4 = nn.Sequential(
-            nn.Conv2d(2048, 256, kernel_size=1, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-        )
-        self.fuse = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=1, bias=False),
+        # Res2Net-50/101 bottleneck stages:
+        # layer3 -> 1024 channels
+        # layer4 -> 2048 channels
+        self.global_proj = nn.Sequential(
+            nn.Conv2d(2048, 512, kernel_size=1, bias=False),
             nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
         )
+        self.part2_proj = nn.Sequential(
+            nn.Conv2d(2048, 512, kernel_size=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+        )
+        self.part4_proj = nn.Sequential(
+            nn.Conv2d(1024, 512, kernel_size=1, bias=False),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+        )
+
+        # Kept only for optional compatibility / future visualization hooks.
+        # Not used as the main branch generator anymore.
+        self.fuse = nn.Identity()
 
         self.gem = GeM(p=3.0, learn_p=True)
         self.pool_2 = nn.AdaptiveAvgPool2d((2, 2))
@@ -218,13 +267,33 @@ class ImageClassificationModel(nn.Module):
         self.pool_4_max = nn.AdaptiveMaxPool2d((4, 4))
 
         self.global_head = PMGHead(
-            512, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            in_dim=512,
+            embed_dim=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            dropout=0.2,
+        )
         self.part2_head = PMGHead(
-            512 * 4, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            in_dim=512 * 4,
+            embed_dim=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            dropout=0.2,
+        )
         self.part4_head = PMGHead(
-            512 * 16, embed_dim, num_classes, num_subcenters, dropout=0.2)
+            in_dim=512 * 16,
+            embed_dim=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            dropout=0.2,
+        )
         self.concat_head = PMGHead(
-            embed_dim * 3, embed_dim, num_classes, num_subcenters, dropout=0.3)
+            in_dim=embed_dim * 3,
+            embed_dim=embed_dim,
+            num_classes=num_classes,
+            num_subcenters=num_subcenters,
+            dropout=0.3,
+        )
 
         self.logit_router = None
         if self.use_logit_router:
@@ -239,16 +308,16 @@ class ImageClassificationModel(nn.Module):
 
     def _freeze_shallow_layers(self):
         for module in [self.stem, self.layer1]:
-            for p in module.parameters():
-                p.requires_grad = False
+            for param in module.parameters():
+                param.requires_grad = False
 
         trainable_modules = [
             self.layer2,
             self.layer3,
             self.layer4,
-            self.proj_l3,
-            self.proj_l4,
-            self.fuse,
+            self.global_proj,
+            self.part2_proj,
+            self.part4_proj,
             self.gem,
             self.global_head,
             self.part2_head,
@@ -259,30 +328,38 @@ class ImageClassificationModel(nn.Module):
             trainable_modules.append(self.logit_router)
 
         for module in trainable_modules:
-            for p in module.parameters():
-                p.requires_grad = True
+            for param in module.parameters():
+                param.requires_grad = True
 
     def _init_new_layers(self):
-        for module in [self.proj_l3, self.proj_l4, self.fuse]:
-            for m in module.modules():
-                if isinstance(m, nn.Conv2d):
+        new_modules = [
+            self.global_proj,
+            self.part2_proj,
+            self.part4_proj,
+        ]
+        for module in new_modules:
+            for submodule in module.modules():
+                if isinstance(submodule, nn.Conv2d):
                     nn.init.kaiming_normal_(
-                        m.weight, mode="fan_out", nonlinearity="relu")
-                elif isinstance(m, nn.BatchNorm2d):
-                    nn.init.ones_(m.weight)
-                    nn.init.zeros_(m.bias)
+                        submodule.weight,
+                        mode="fan_out",
+                        nonlinearity="relu",
+                    )
+                elif isinstance(submodule, nn.BatchNorm2d):
+                    nn.init.ones_(submodule.weight)
+                    nn.init.zeros_(submodule.bias)
 
     def check_parameters(self):
-        total = sum(p.numel() for p in self.parameters())
+        total = sum(param.numel() for param in self.parameters())
         print(f"Parameters : {total}")
         return total < 100_000_000
 
     def get_parameter_groups(self, lr_base):
         head_params = []
-        modules = [
-            self.proj_l3,
-            self.proj_l4,
-            self.fuse,
+        head_modules = [
+            self.global_proj,
+            self.part2_proj,
+            self.part4_proj,
             self.gem,
             self.global_head,
             self.part2_head,
@@ -290,59 +367,97 @@ class ImageClassificationModel(nn.Module):
             self.concat_head,
         ]
         if self.logit_router is not None:
-            modules.append(self.logit_router)
+            head_modules.append(self.logit_router)
 
-        for module in modules:
+        for module in head_modules:
             head_params.extend(
-                [p for p in module.parameters() if p.requires_grad])
+                [param for param in module.parameters() if param.requires_grad]
+            )
 
         return [
-            {"params": [p for p in self.layer2.parameters(
-            ) if p.requires_grad], "lr": lr_base * 0.1},
-            {"params": [p for p in self.layer3.parameters(
-            ) if p.requires_grad], "lr": lr_base * 0.5},
-            {"params": [p for p in self.layer4.parameters(
-            ) if p.requires_grad], "lr": lr_base * 1.0},
-            {"params": head_params, "lr": lr_base * 1.5},
+            {
+                "params": [
+                    param for param in self.layer2.parameters()
+                    if param.requires_grad
+                ],
+                "lr": lr_base * 0.1,
+            },
+            {
+                "params": [
+                    param for param in self.layer3.parameters()
+                    if param.requires_grad
+                ],
+                "lr": lr_base * 0.5,
+            },
+            {
+                "params": [
+                    param for param in self.layer4.parameters()
+                    if param.requires_grad
+                ],
+                "lr": lr_base * 1.0,
+            },
+            {
+                "params": head_params,
+                "lr": lr_base * 1.5,
+            },
         ]
 
-    def forward_features(self, x):
+    def forward_backbone(self, x):
         x = self.stem(x)
         x = self.layer1(x)
         feat_l2 = self.layer2(x)
         feat_l3 = self.layer3(feat_l2)
         feat_l4 = self.layer4(feat_l3)
+        return feat_l3, feat_l4
 
-        feat_l3_proj = self.proj_l3(feat_l3)
-        feat_l4_proj = self.proj_l4(feat_l4)
-        feat_l3_proj_down = F.adaptive_avg_pool2d(
-            feat_l3_proj, feat_l4_proj.shape[-2:])
-        fused_map = self.fuse(
-            torch.cat([feat_l3_proj_down, feat_l4_proj], dim=1))
-        return feat_l2, feat_l3, feat_l4, feat_l3_proj, feat_l4_proj, fused_map
+    def forward_features(self, x):
+        feat_l3, feat_l4 = self.forward_backbone(x)
 
-    def forward_pmg(self, x, return_attn=False):
-        _, _, _, feat_l3_proj, feat_l4_proj, fused_map = self.forward_features(
-            x)
+        global_map = self.global_proj(feat_l4)   # [B, 512, H4, W4]
+        part2_map = self.part2_proj(feat_l4)     # [B, 512, H4, W4]
+        part4_map = self.part4_proj(feat_l3)     # [B, 512, H3, W3]
 
-        global_feat = self.gem(fused_map)
+        return {
+            "feat_l3": feat_l3,
+            "feat_l4": feat_l4,
+            "global_map": global_map,
+            "part2_map": part2_map,
+            "part4_map": part4_map,
+        }
+
+    def _build_global_feature(self, global_map):
+        return self.gem(global_map)
+
+    def _build_part2_feature(self, part2_map):
+        part2_grid = self.pool_2(part2_map)  # [B, 512, 2, 2]
+        return part2_grid.flatten(1)
+
+    def _build_part4_feature(self, part4_map):
+        part4_avg = self.pool_4_avg(part4_map)
+        part4_max = self.pool_4_max(part4_map)
+        part4_grid = 0.5 * (part4_avg + part4_max)  # part4 AvgMax
+        return part4_grid.flatten(1)
+
+    def forward_pmg(self, x):
+        feats = self.forward_features(x)
+
+        global_feat = self._build_global_feature(feats["global_map"])
+        part2_feat = self._build_part2_feature(feats["part2_map"])
+        part4_feat = self._build_part4_feature(feats["part4_map"])
+
         global_logits, global_embed, global_logits_all = self.global_head(
             global_feat)
-
-        part2_feat = self.pool_2(fused_map).flatten(1)
         part2_logits, part2_embed, part2_logits_all = self.part2_head(
             part2_feat)
-
-        part4_avg = self.pool_4_avg(fused_map)
-        part4_max = self.pool_4_max(fused_map)
-        part4_feat = (part4_avg + part4_max).flatten(1)
         part4_logits, part4_embed, part4_logits_all = self.part4_head(
             part4_feat)
 
-        concat_feat = torch.cat(
-            [global_embed, part2_embed, part4_embed], dim=1)
+        concat_input = torch.cat(
+            [global_embed, part2_embed, part4_embed],
+            dim=1,
+        )
         concat_logits, concat_embed, concat_logits_all = self.concat_head(
-            concat_feat)
+            concat_input)
 
         outputs = {
             "global_logits": global_logits,
@@ -357,60 +472,44 @@ class ImageClassificationModel(nn.Module):
             "part2_logits_all": part2_logits_all,
             "part4_logits_all": part4_logits_all,
             "concat_logits_all": concat_logits_all,
-            "fused_map": fused_map,
-            "feat_l3_proj": feat_l3_proj,
-            "feat_l4_proj": feat_l4_proj,
-            "part4_source": fused_map,
-            "part4_avg_map": part4_avg,
-            "part4_max_map": part4_max,
+            "feat_l3": feats["feat_l3"],
+            "feat_l4": feats["feat_l4"],
+            "global_map": feats["global_map"],
+            "part2_map": feats["part2_map"],
+            "part4_map": feats["part4_map"],
         }
 
         if self.logit_router is not None:
             router_logits, router_weights, router_stats = self.logit_router(
-                global_logits, part2_logits, part4_logits, concat_logits
+                global_logits=global_logits,
+                part2_logits=part2_logits,
+                part4_logits=part4_logits,
+                concat_logits=concat_logits,
             )
             outputs["router_logits"] = router_logits
             outputs["router_weights"] = router_weights
-            outputs.update({f"router_{k}": v for k, v in router_stats.items()})
+            outputs["router_stats"] = router_stats
 
         return outputs
 
-    def router_balance_loss(self, router_weights, target_prior=None):
-        if target_prior is None:
-            target_prior = torch.full(
-                (router_weights.size(1),),
-                1.0 / router_weights.size(1),
-                device=router_weights.device,
-            )
-        mean_w = router_weights.mean(dim=0)
-        return F.kl_div(mean_w.clamp_min(1e-8).log(), target_prior, reduction="batchmean")
+    def forward(self, x):
+        outputs = self.forward_pmg(x)
+        if self.logit_router is not None:
+            return outputs["router_logits"]
+        return outputs["concat_logits"]
 
-    def prototype_diversity_loss(self, margin=0.2):
-        total_loss = 0.0
-        count = 0
+    def prototype_diversity_loss(self):
+        # Kept for compatibility with existing train.py
+        if self.logit_router is not None:
+            device = next(self.parameters()).device
+            return torch.zeros(1, device=device, dtype=torch.float32).squeeze(0)
 
-        classifiers = [
-            self.global_head.classifier,
-            self.part2_head.classifier,
-            self.part4_head.classifier,
-            self.concat_head.classifier,
-        ]
+        device = next(self.parameters()).device
+        return torch.zeros(1, device=device, dtype=torch.float32).squeeze(0)
 
-        for clf in classifiers:
-            if clf.num_subcenters <= 1:
-                continue
-
-            w = F.normalize(clf.weight, dim=2)
-            _, k, _ = w.shape
-
-            sim = torch.einsum("ckd,cjd->ckj", w, w)
-            eye = torch.eye(k, device=sim.device).unsqueeze(0)
-            off_diag = sim * (1.0 - eye)
-
-            loss = F.relu(off_diag - margin).mean()
-            total_loss = total_loss + loss
-            count += 1
-
-        if count == 0:
-            return torch.tensor(0.0, device=self.global_head.classifier.weight.device)
-        return total_loss / count
+    def router_balance_loss(self, router_weights):
+        target = torch.full_like(
+            router_weights,
+            fill_value=1.0 / router_weights.size(1),
+        )
+        return F.mse_loss(router_weights, target)

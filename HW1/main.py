@@ -25,11 +25,21 @@ cudnn.benchmark = True
 
 
 def build_optimizer(model, lr_base):
-    return optim.AdamW(model.get_parameter_groups(lr_base), weight_decay=5e-4)
+    return optim.AdamW(
+        model.get_parameter_groups(lr_base),
+        weight_decay=5e-4,
+    )
 
 
 class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
-    def __init__(self, optimizer, T_max, warmup_epochs=5, eta_min=1e-6, last_epoch=-1):
+    def __init__(
+        self,
+        optimizer,
+        T_max,
+        warmup_epochs=5,
+        eta_min=1e-6,
+        last_epoch=-1,
+    ):
         self.T_max = max(1, T_max)
         self.warmup_epochs = min(warmup_epochs, max(0, self.T_max - 1))
         self.eta_min = eta_min
@@ -43,32 +53,34 @@ class WarmUpCosineAnnealingLR(torch.optim.lr_scheduler._LRScheduler):
         if self.T_max == self.warmup_epochs:
             return [self.eta_min for _ in self.base_lrs]
 
-        progress = (self.last_epoch - self.warmup_epochs) / \
-            max(1, self.T_max - self.warmup_epochs)
+        progress = (
+            (self.last_epoch - self.warmup_epochs)
+            / max(1, self.T_max - self.warmup_epochs)
+        )
         progress = min(max(progress, 0.0), 1.0)
 
         return [
-            self.eta_min + (base_lr - self.eta_min) *
-            (1 + math.cos(math.pi * progress)) / 2
+            self.eta_min + (base_lr - self.eta_min)
+            * (1 + math.cos(math.pi * progress)) / 2
             for base_lr in self.base_lrs
         ]
 
 
 def get_train_geometry(epoch, config):
-    stage1_epochs = config.get("pmg_stage1_epochs", 4)
-    stage2_epochs = config.get("pmg_stage2_epochs", 4)
+    stage1_epochs = config.get("pmg_stage1_epochs", 6)
+    stage2_epochs = config.get("pmg_stage2_epochs", 6)
 
     if epoch <= stage1_epochs + stage2_epochs:
         return {
             "resize": config.get("curriculum_stage12_resize", 576),
-            "crop": config.get("curriculum_stage12_crop", 448),
-            "tag": "stage12_small_crop"
+            "crop": config.get("curriculum_stage12_crop", 512),
+            "tag": "stage12_geometry",
         }
 
     return {
-        "resize": config.get("curriculum_stage3_resize", 640),
-        "crop": config.get("curriculum_stage3_crop", 576),
-        "tag": "stage3_large_crop"
+        "resize": config.get("curriculum_stage3_resize", 576),
+        "crop": config.get("curriculum_stage3_crop", 512),
+        "tag": "stage3_geometry",
     }
 
 
@@ -89,12 +101,15 @@ def build_train_transform(resize_size, crop_size):
             saturation=0.08,
             hue=0.02,
         ),
-        transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=0.3),
+        transforms.RandomAdjustSharpness(
+            sharpness_factor=1.5,
+            p=0.3,
+        ),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+            std=[0.229, 0.224, 0.225],
+        ),
     ])
 
 
@@ -104,8 +119,8 @@ def build_val_transform(eval_resize):
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+            std=[0.229, 0.224, 0.225],
+        ),
     ])
 
 
@@ -170,10 +185,12 @@ def main():
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # validation/test/analyze 固定 576
     val_transform = build_val_transform(eval_resize)
     val_dataset, val_loader = build_val_loader(
-        data_dir, batch_size, val_transform)
+        data_dir,
+        batch_size,
+        val_transform,
+    )
 
     model = ImageClassificationModel(
         num_classes=num_classes,
@@ -185,7 +202,7 @@ def main():
         router_dropout=config.get("router_dropout", 0.1),
         backbone_name=config.get("backbone_name", "res2net50_26w_4s"),
     ).to(device)
-    
+
     if not model.check_parameters():
         print("The number of parameters is greater than 100,000,000!")
         return
@@ -195,7 +212,10 @@ def main():
 
     optimizer = build_optimizer(model, lr_base)
     scheduler = WarmUpCosineAnnealingLR(
-        optimizer, T_max=max(1, num_epochs), warmup_epochs=5, eta_min=1e-6
+        optimizer,
+        T_max=max(1, num_epochs),
+        warmup_epochs=5,
+        eta_min=1e-6,
     )
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
@@ -219,15 +239,23 @@ def main():
 
     if resume_training and os.path.exists(checkpoint_path):
         checkpoint = torch.load(
-            checkpoint_path, map_location=device, weights_only=False)
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
         best_val_acc = checkpoint.get("best_val_acc", 0.0)
         best_val_loss_for_acc = checkpoint.get(
-            "best_val_loss_for_acc", float("inf"))
-        best_val_loss_only = checkpoint.get("best_val_loss_only", float("inf"))
+            "best_val_loss_for_acc",
+            float("inf"),
+        )
+        best_val_loss_only = checkpoint.get(
+            "best_val_loss_only",
+            float("inf"),
+        )
         history = checkpoint.get("history", history)
         epochs_no_improve = checkpoint.get("epochs_no_improve", 0)
         best_val_preds = checkpoint.get("best_val_preds", [])
@@ -250,16 +278,16 @@ def main():
             if current_loader_tag != geometry["tag"]:
                 train_transform = build_train_transform(
                     resize_size=geometry["resize"],
-                    crop_size=geometry["crop"]
+                    crop_size=geometry["crop"],
                 )
                 train_dataset, train_loader = build_train_loader(
                     data_dir=data_dir,
                     batch_size=batch_size,
-                    train_transform=train_transform
+                    train_transform=train_transform,
                 )
                 current_loader_tag = geometry["tag"]
                 print(
-                    f"🔁 Switched train geometry -> "
+                    "🔁 Switched train geometry -> "
                     f"Resize({geometry['resize']}) + RandomCrop({geometry['crop']})"
                 )
 
@@ -321,7 +349,6 @@ def main():
                 f"concat: {stage_cfg['concat_weight']:.2f}, "
                 f"router: {stage_cfg.get('router_weight', 0.0):.2f}"
             )
-
             print(
                 f"LR: {optimizer.param_groups[-1]['lr']:.6f} | "
                 f"Train Loss: {train_loss:.4f} | Train Main Acc: {train_acc:.2f}% | "
@@ -341,7 +368,9 @@ def main():
 
             improved = False
 
-            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss_for_acc):
+            if val_acc > best_val_acc or (
+                val_acc == best_val_acc and val_loss < best_val_loss_for_acc
+            ):
                 best_val_acc = val_acc
                 best_val_loss_for_acc = val_loss
                 best_val_preds = val_preds
@@ -363,19 +392,22 @@ def main():
                 print(
                     f"No improvement! {epochs_no_improve}/{early_stopping_patience}")
 
-            torch.save({
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "best_val_acc": best_val_acc,
-                "best_val_loss_for_acc": best_val_loss_for_acc,
-                "best_val_loss_only": best_val_loss_only,
-                "history": history,
-                "epochs_no_improve": epochs_no_improve,
-                "best_val_preds": best_val_preds,
-                "best_val_labels": best_val_labels,
-            }, checkpoint_path)
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "best_val_acc": best_val_acc,
+                    "best_val_loss_for_acc": best_val_loss_for_acc,
+                    "best_val_loss_only": best_val_loss_only,
+                    "history": history,
+                    "epochs_no_improve": epochs_no_improve,
+                    "best_val_preds": best_val_preds,
+                    "best_val_labels": best_val_labels,
+                },
+                checkpoint_path,
+            )
 
             if epochs_no_improve >= early_stopping_patience:
                 break
@@ -392,10 +424,14 @@ def main():
     if history["train_loss"]:
         print("\n📈 Generating analysis plots...")
         plot_training_curves(
-            history["train_loss"], history["val_loss"],
-            history["train_acc"], history["val_acc"],
+            history["train_loss"],
+            history["val_loss"],
+            history["train_acc"],
+            history["val_acc"],
             save_path=os.path.join(
-                plot_dir, "training_curves_router_curriculum.png")
+                plot_dir,
+                "training_curves_res2net_pure_pmg_realignment_v1.png",
+            ),
         )
 
         if best_val_preds and best_val_labels:
@@ -404,7 +440,9 @@ def main():
                 best_val_labels,
                 num_classes=num_classes,
                 save_path=os.path.join(
-                    plot_dir, "error_dist_router_curriculum.png")
+                    plot_dir,
+                    "error_dist_res2net_pure_pmg_realignment_v1.png",
+                ),
             )
             plot_long_tail_accuracy(
                 train_labels=train_dataset.targets,
@@ -412,7 +450,9 @@ def main():
                 val_labels=best_val_labels,
                 num_classes=num_classes,
                 save_path=os.path.join(
-                    plot_dir, "long_tail_acc_router_curriculum.png")
+                    plot_dir,
+                    "long_tail_acc_res2net_pure_pmg_realignment_v1.png",
+                ),
             )
 
     print(
