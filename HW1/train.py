@@ -1,3 +1,5 @@
+"""Training helpers for progressive multi-granularity supervision."""
+
 from typing import Dict
 
 import torch
@@ -5,6 +7,7 @@ from tqdm import tqdm
 
 
 def _get_stage_weights(epoch: int, stage1_epochs: int, stage2_epochs: int, config: Dict) -> Dict:
+    """Return loss weights for the current training stage."""
     if epoch <= stage1_epochs:
         return {
             "stage_name": "Stage A | Uniform warmup",
@@ -12,7 +15,7 @@ def _get_stage_weights(epoch: int, stage1_epochs: int, stage2_epochs: int, confi
             "part2_weight": config.get("pmg_stage1_part2_weight", 0.8),
             "part4_weight": config.get("pmg_stage1_part4_weight", 0.8),
             "concat_weight": config.get("pmg_stage1_concat_weight", 0.8),
-            "use_concat_as_main": False,  # 保留欄位，但不再用來決定 main_acc
+            "use_concat_as_main": False,  
         }
     if epoch <= stage1_epochs + stage2_epochs:
         return {
@@ -34,6 +37,7 @@ def _get_stage_weights(epoch: int, stage1_epochs: int, stage2_epochs: int, confi
 
 
 def _compute_pmg_loss(outputs, labels, criterion, stage_cfg):
+    """Compute the weighted PMG classification loss for one batch."""
     loss = outputs["global_logits"].new_tensor(0.0)
 
     if stage_cfg["global_weight"] > 0:
@@ -49,17 +53,20 @@ def _compute_pmg_loss(outputs, labels, criterion, stage_cfg):
 
 
 def _get_eval_logits(outputs, stage_cfg):
-    # 方案 B：main_acc 永遠看 global branch
+    """Select which logits should be treated as the main prediction."""
+
     return outputs["global_logits"]
 
 
 def _compute_batch_acc(logits, labels):
+    """Compute correct predictions and predicted labels for a batch."""
     preds = torch.argmax(logits, dim=1)
     correct = torch.sum(preds == labels).item()
     return correct, preds
 
 
 def train_one_epoch(model, train_loader, criterion, epoch, optimizer, device, scaler, config, max_grad_norm: float = 5.0):
+    """Run one training epoch and return summary statistics."""
     model.train()
     stage_cfg = _get_stage_weights(
         epoch=epoch,
@@ -117,7 +124,7 @@ def train_one_epoch(model, train_loader, criterion, epoch, optimizer, device, sc
 
     return {
         "loss": running_loss / max(1, total),
-        "main_acc": (main_correct / max(1, total)) * 100,      # 現在代表 global_acc
-        "concat_acc": (concat_correct / max(1, total)) * 100,  # concat/final acc
+        "main_acc": (main_correct / max(1, total)) * 100,      
+        "concat_acc": (concat_correct / max(1, total)) * 100,  
         "stage_cfg": stage_cfg,
     }
