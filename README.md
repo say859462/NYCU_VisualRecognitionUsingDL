@@ -72,12 +72,10 @@ This script saves qualitative visualizations for the original image, branch-spec
 
 ## Performance Snapshot
 
-Main observations from the project:
-
-- A stronger **ResNet-152** backbone and higher input resolution produced the most reliable gains over earlier smaller baselines.
+Main observations from the homework:
 - The PMG-style multi-granularity design improved representation quality by separating global, coarse, and fine evidence.
 - The final system uses a **reliability-aware consensus fusion** module that combines branch logits together with branch-confidence statistics, rather than relying on a naive concatenation rule.
-- According to the report summary, the project reached a relatively stable validation ceiling in the **low-to-mid 90% range**, and the strongest results came from combining a high-resolution ResNet-152 backbone with stable multi-granularity supervision and lightweight fusion.
+
 
 <img width="1280" height="60" alt="image" src="https://github.com/user-attachments/assets/f11a06d2-9ea5-480c-9d1b-e75d940356e0" />
 
