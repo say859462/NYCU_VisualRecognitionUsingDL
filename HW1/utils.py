@@ -1,3 +1,5 @@
+"""Utility functions for visualization, cropping, and analysis."""
+
 import math
 import os
 from typing import List, Tuple
@@ -12,6 +14,7 @@ from torchvision.transforms import functional as TF
 
 
 class PadToSquare:
+    """Pad a PIL image to a square canvas before resizing."""
     def __init__(self, fill=(0, 0, 0)):
         self.fill = fill
 
@@ -29,6 +32,7 @@ class PadToSquare:
 
 
 def _normalize_map(attn: torch.Tensor) -> torch.Tensor:
+    """Normalize a saliency map to the [0, 1] range."""
     attn = attn - attn.amin(dim=(2, 3), keepdim=True)
     attn = attn / (attn.amax(dim=(2, 3), keepdim=True) + 1e-8)
     return attn
@@ -104,6 +108,7 @@ def build_attention_boxes(
 
 
 def crop_and_resize_batch(images: torch.Tensor, boxes: List[Tuple[int, int, int, int]]) -> torch.Tensor:
+    """Crop each image with its box and resize it back to the input size."""
     crops = []
     _, _, height, width = images.shape
     for idx, (y1, x1, y2, x2) in enumerate(boxes):
@@ -155,6 +160,7 @@ def plot_training_curves(
     val_accs,
     save_path="./Plot/training_curves.png",
 ):
+    """Plot train/validation loss and accuracy curves."""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     epochs = list(range(1, len(train_losses) + 1))
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
@@ -209,6 +215,7 @@ def plot_training_curves(
 
 
 def plot_per_class_error(all_preds, all_labels, num_classes=100, save_path="./Plot/class_error_dist.png"):
+    """Plot class-wise validation error rates."""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     error_rates = []
     labels_np = np.array(all_labels)
@@ -240,6 +247,7 @@ def plot_long_tail_accuracy(
     num_classes=100,
     save_path="./Plot/long_tail_accuracy.png",
 ):
+    """Plot the relation between train-set size and validation accuracy."""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     train_counts = []
     for class_id in range(num_classes):
