@@ -1,3 +1,5 @@
+"""Dataset utilities for NYCU VRDL Homework 1."""
+
 import os
 from PIL import Image
 from torch.utils.data import Dataset
@@ -5,16 +7,17 @@ from torch.utils.data import Dataset
 
 # Define Custom Dataset
 class ImageDataset(Dataset):
+    """Custom dataset wrapper for train / val / test image folders."""
 
     def __init__(
         self, root_dir: str = "./Dataset/data", split: str = "train", transform=None
     ):
-        """_
-        Dataset Initialization
+        """Initialize the dataset from the homework directory structure.
+
         Args:
-            root_dir (str): Directory path that contain datas
-            split (str, optional): train, validation , test dataset. Defaults to 'train'.
-            transform (_type_, optional): Data augmentation. Defaults to None.
+            root_dir: Root directory that stores the dataset splits.
+            split: One of "train", "val", or "test".
+            transform: Optional torchvision transform pipeline.
         """
         self.root_dir = root_dir
         self.split = split
@@ -50,9 +53,11 @@ class ImageDataset(Dataset):
         self.targets = self.labels
         
     def __len__(self) -> int:
+        """Return the number of samples in the selected split."""
         return len(self.image_paths)
 
     def __getitem__(self, idx: int):
+        """Load one image-label pair from disk."""
         img_path = self.image_paths[idx]
 
         # Read image
@@ -68,6 +73,7 @@ class ImageDataset(Dataset):
 
 # Function : Download dataset from given google drive url
 def download_dataset(output_dir: str = "./Dataset"):
+    """Download and extract the official homework dataset."""
     import gdown
     import tarfile
 
